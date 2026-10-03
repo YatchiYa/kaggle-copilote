@@ -48,6 +48,9 @@ Tools:
   after the user explicitly wants that; always say clearly that it cannot be won.
 - add_competition(query): add a competition from a Kaggle URL, slug or name (opts it in; reports if it has ended,
   if it still needs joining, or if its kind makes it a dedicated project).
+- run_now(slug, idea=None): the user starts a competition (or pushes a running one) directly: no rank-chance bar,
+  no active-slot limit, any data kind (Kaggle notebooks for code/vision/NLP). `idea` = what the Solver must try in
+  its next experiment (e.g. "add target encoding of store x item"). Joining on Kaggle is still required first.
 - bootstrap_project(slug): (re)build a dedicated project's workspace: official pages, top public notebooks and an
   expert PLAN.md with a dated timeline (done automatically for every joined project; use this to refresh it).
 - run_public_baseline(slug, ref=None): fork the best-scoring public notebook (or `ref`) as a PRIVATE notebook, run
@@ -228,6 +231,11 @@ def _kaggle_submissions(slug):
             for r in rows[:15]]
 
 
+def _run_now(slug, idea=None):
+    from .api import RunIn, run_now
+    return run_now(slug, RunIn(idea=idea))
+
+
 def _bootstrap_project(slug):
     from . import projects
     r = projects.bootstrap(slug, force=True)
@@ -292,8 +300,8 @@ TOOLS = {"fleet": _fleet, "competition": _competition, "leaderboard": _leaderboa
          "start": _start, "pause": _pause, "stop": _stop, "archive": _archive, "set_setting": _set_setting, "scout_now": _scout_now,
          "read_file": _read_file, "resolve_decision": _resolve_decision, "add_competition": _add_competition, "practice": _practice,
          "scan_recent": _scan_recent, "kaggle_submissions": _kaggle_submissions, "navigate": _navigate,
-         "bootstrap_project": _bootstrap_project, "run_public_baseline": _run_public_baseline}
-ACTIONS = {"bootstrap_project", "run_public_baseline", "recommend", "start", "pause", "stop", "archive", "add_competition", "practice", "set_setting", "scout_now", "resolve_decision", "navigate"}
+         "bootstrap_project": _bootstrap_project, "run_now": _run_now, "run_public_baseline": _run_public_baseline}
+ACTIONS = {"run_now", "bootstrap_project", "run_public_baseline", "recommend", "start", "pause", "stop", "archive", "add_competition", "practice", "set_setting", "scout_now", "resolve_decision", "navigate"}
 
 
 def snapshot(context=None):

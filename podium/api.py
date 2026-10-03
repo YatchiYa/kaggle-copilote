@@ -195,6 +195,36 @@ def activate(slug: str):
     return {"ok": True}
 
 
+class RunIn(BaseModel):
+    idea: str | None = None
+
+
+@app.post("/api/competitions/{slug}/run")
+def run_now(slug: str, body: RunIn = RunIn()):
+    """You start it yourself: no rank-chance bar, no active-slot limit, any runnable kind. Optional idea = what the
+    Solver must try in its next experiment."""
+    c = db.one("SELECT * FROM competitions WHERE slug=?", slug)
+    if not c:
+        raise HTTPException(404)
+    if c["kind"] == "other":
+        raise HTTPException(400, "This competition is not a data competition (agent, paper or simulation): use the "
+                                 "project actions (plan, public baseline) instead.")
+    idea = (body.idea or "").strip()[:2000]
+    if idea:
+        db.set_setting(f"idea:{slug}", db.setting(f"idea:{slug}", []) + [idea])
+    if c["state"] == "active":
+        db.x("UPDATE competitions SET paused=0, manual=1 WHERE slug=?", slug)
+    else:
+        db.x("UPDATE competitions SET state='needs_rules', opt_in=1, manual=1, paused=0 WHERE slug=?", slug)
+        db.x("UPDATE runs SET status='done' WHERE competition_slug=? AND status='running'", slug)
+    db.emit("Human", "competition.run_now", {"idea": idea}, competition=slug)
+    note = "Starts on the next fleet pass (within a minute)." if c["rules_accepted"] else \
+        f"Join it first on Kaggle (https://www.kaggle.com/competitions/{slug}/rules): it starts as soon as you have."
+    if c["state"] == "active":
+        note = "Already running: " + ("your idea goes into the next experiment." if idea else "resumed.")
+    return {"ok": True, "note": note, "joined": bool(c["rules_accepted"])}
+
+
 @app.post("/api/fleet/pause")
 def pause_fleet():
     p = not db.setting("fleet_paused", False)
@@ -369,7 +399,8 @@ def all_submissions():
 @app.post("/api/competitions/{slug}/stop")
 def stop(slug: str):
     """Decision: stop working on a competition. It stays stopped (never auto-restarted) until resumed."""
-    db.x("UPDATE competitions SET state='stopped', opt_in=0 WHERE slug=?", slug)
+    db.x("UPDATE competitions SET state='stopped', opt_in=0, manual=0 WHERE slug=?", slug)
+    db.set_setting(f"idea:{slug}", [])
     agents.kill_experiments(slug)
     db.x("UPDATE runs SET status='done' WHERE competition_slug=? AND status='running'", slug)
     db.x("UPDATE human_tasks SET status='done' WHERE competition_slug=? AND status='open'", slug)
@@ -429,7 +460,7 @@ def practice(slug: str):
 @app.post("/api/competitions/{slug}/archive")
 def archive(slug: str):
     """Decision: remove a competition from every list and recommendation (files and history are kept)."""
-    db.x("UPDATE competitions SET state='archived', opt_in=0 WHERE slug=?", slug)
+    db.x("UPDATE competitions SET state='archived', opt_in=0, manual=0 WHERE slug=?", slug)
     agents.kill_experiments(slug)
     db.x("UPDATE runs SET status='done' WHERE competition_slug=? AND status='running'", slug)
     db.x("UPDATE human_tasks SET status='done' WHERE competition_slug=? AND status='open'", slug)
@@ -814,7 +845,9 @@ def _devruns(project_dir):
         meta = json.loads(rj.read_text())
         tag, key = rj.parent.name, f"devrun:{project_dir.name}:{rj.parent.name}"
         st = db.setting(key, {})
-        if time.time() - st.get("at", 0) > 180 and st.get("status") not in ("complete", "error", "cancelacknowledged"):
+        if meta.get("checked"):  # followed by projects.track() (retries included): its status is the live one
+            st = {"status": meta.get("status"), "failure": meta.get("failure") or ""}
+        elif time.time() - st.get("at", 0) > 180 and st.get("status") not in ("complete", "error", "cancelacknowledged"):
             try:
                 s = agents.kaggle().kernels_status(meta["ref"])
                 st = {"status": str(getattr(s, "status", s)).split(".")[-1].lower(), "at": time.time(),
@@ -822,6 +855,10 @@ def _devruns(project_dir):
             except Exception as e:
                 st = {"status": "unknown", "at": time.time(), "failure": str(e)[:120]}
             db.set_setting(key, st)
+        diag = rj.parent / "diagnosis.json"
+        if diag.exists():
+            dj = json.loads(diag.read_text())
+            st = {**st, "failure": f"{dj.get('cause', '')} Fix: {dj.get('fix', '')}"[:400]}
         summ = rj.parent / "output" / "podium_summary.json"
         runs.append({"tag": tag, "ref": meta["ref"], "url": meta.get("url"), "tasks": len(meta.get("tasks", [])),
                      "agent": Path(meta.get("agent", "")).name, "status": st.get("status"), "failure": st.get("failure"),

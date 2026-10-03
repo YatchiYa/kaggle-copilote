@@ -75,7 +75,8 @@ MIGRATIONS = ["ALTER TABLE competitions ADD COLUMN why TEXT", "ALTER TABLE compe
               "ALTER TABLE competitions ADD COLUMN category TEXT",
               "ALTER TABLE competitions ADD COLUMN opt_in INTEGER DEFAULT 0", "ALTER TABLE experiments ADD COLUMN review TEXT",
               "ALTER TABLE experiments ADD COLUMN cv_scheme TEXT",
-              "ALTER TABLE competitions ADD COLUMN practice INTEGER DEFAULT 0"]
+              "ALTER TABLE competitions ADD COLUMN practice INTEGER DEFAULT 0",
+              "ALTER TABLE competitions ADD COLUMN manual INTEGER DEFAULT 0"]
 
 
 def init():
@@ -108,7 +109,7 @@ def x(sql, *args):
 # Event types that reach you by email / webhook. Noisy ones are throttled per competition.
 NOTIFY_TYPES = {"plan.hold", "submission.scored", "rank.updated", "human_task.opened", "agent.error", "cv_lb.diverged",
                 "competition.unblocked", "competition.recommended", "strategy.updated", "competition.joined",
-                "project.bootstrapped"}
+                "project.bootstrapped", "project.run_failed", "project.run_done"}
 THROTTLED = {"agent.error": 3600, "cv_lb.diverged": 6 * 3600, "strategy.updated": 3600}
 _last_sent = {}
 
@@ -153,6 +154,10 @@ def describe(type, payload, competition):
         "project.baseline": lambda: (f"{c}: baseline launch failed: {p['error']}" if p.get("error") else
                                      f"{c}: forked public notebook {p.get('from')} privately as {p.get('run')}; it runs on Kaggle "
                                      "and is submitted when it finishes."),
+        "competition.run_now": lambda: f"{c}: you started it manually" + (f"; next experiment: {p['idea'][:160]}" if p.get("idea") else "") + ".",
+        "project.run_failed": lambda: (f"{c}: Kaggle run {p.get('run')} failed: {p.get('cause')} "
+                                       + ("Fixed and re-launched automatically." if p.get("retried") else f"Fix needed: {p.get('fix')}")),
+        "project.run_done": lambda: f"{c}: Kaggle run {p.get('run')} finished; results downloaded.",
         "competition.practice": lambda: f"{c}: practice mode on (late submissions: scored, not ranked).",
         "strategy.stagnation": lambda: f"{c}: {p.get('since_best')} experiments without a new best: emergency reflection with research.",
         "competition.added": lambda: f"{c}: added by you" + (" (already ended)" if p.get("ended") else "") + ".",

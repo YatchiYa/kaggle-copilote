@@ -258,20 +258,20 @@ def gatekeeper():
     # Joined competitions the fleet cannot run (agent, paper, code-only...) are dedicated projects, not "join needed".
     kinds_sql = ",".join("?" * len(config.KINDS))
     for c in db.q(f"SELECT slug FROM competitions WHERE rules_accepted=1 AND state IN ('scouted','needs_rules') "
-                  f"AND kind NOT IN ({kinds_sql}) AND (opt_in=1 OR state='needs_rules')", *config.KINDS):
+                  f"AND kind NOT IN ({kinds_sql}) AND manual=0 AND (opt_in=1 OR state='needs_rules')", *config.KINDS):
         db.x("UPDATE competitions SET state='project' WHERE slug=?", c["slug"])
         db.emit("Gatekeeper", "competition.project", {"note": "joined; handled as a dedicated project outside the fleet"},
                 competition=c["slug"])
     active = db.one("SELECT COUNT(*) n FROM competitions WHERE state='active'")["n"]
     kinds = ",".join("?" * len(config.KINDS))
     # Opted-in (Done in the Inbox / "Work on it") or good-chance competitions; joined ones first.
-    cands = db.q(f"SELECT * FROM competitions WHERE state IN ('scouted','needs_rules') AND kind IN ({kinds}) "
-                 f"AND (interest_score >= ? OR opt_in=1) "
-                 f"ORDER BY opt_in DESC, rules_accepted DESC, interest_score DESC, deadline LIMIT ?",
-                 *config.KINDS, config.MIN_CHANCE, config.MAX_ACTIVE * 3)
+    cands = db.q(f"SELECT * FROM competitions WHERE state IN ('scouted','needs_rules') "
+                 f"AND ((kind IN ({kinds}) AND (interest_score >= ? OR opt_in=1)) OR manual=1) "
+                 f"ORDER BY manual DESC, opt_in DESC, rules_accepted DESC, interest_score DESC, deadline LIMIT ?",
+                 *config.KINDS, config.MIN_CHANCE, config.MAX_ACTIVE * 3 + 20)  # room for manual runs
     for c in cands:
-        if active >= config.MAX_ACTIVE:
-            break
+        if active >= config.MAX_ACTIVE and not c["manual"]:  # Run now (you) always gets a slot
+            continue
         slug, d = c["slug"], comp_dir(c["slug"]) / "data"
         try:
             d.mkdir(parents=True, exist_ok=True)
@@ -363,6 +363,8 @@ def task_for(c, with_strategy=True):
     if c["lb_rank"]:
         fb.append(f"Our current public rank: {c['lb_rank']}/{c['lb_teams']} (top {100 * c['lb_rank'] / c['lb_teams']:.1f}%).")
     fb += score_targets(c)
+    for idea in db.setting(f"idea:{c['slug']}", []):
+        fb.append(f"USER REQUEST (do this in the NEXT experiment, before the hypothesis queue): {idea}")
     for s in db.q("SELECT s.experiment_id, e.cv_mean, e.summary, s.lb_public FROM submissions s JOIN experiments e "
                   "ON s.experiment_id=e.id WHERE s.competition_slug=? AND s.lb_public IS NOT NULL", c["slug"]):
         fb.append(f"Submitted {s['experiment_id']} '{s['summary'][:80]}': CV {s['cv_mean']:.5f} -> public LB {s['lb_public']:.5f}")
@@ -723,6 +725,8 @@ def solve_one(c):
         return run_experiment(c, run, task, prop, exp_id)
     prop = engines.ENGINES[run["engine"]](task, history)
     db.set_setting(f"conv:{c['slug']}:solver:plan_seen", task.get("plan_version"))  # the Solver has now seen this plan
+    if prop is not None and not prop.get("blend") and "USER REQUEST" in task["feedback"]:
+        db.set_setting(f"idea:{c['slug']}", [])  # your idea is in this experiment
     if prop is None:
         return finish_run(c, run, {"reason": "engine plan exhausted"})
     if not still_wanted(c["slug"]):  # paused/stopped while the AI was writing the experiment

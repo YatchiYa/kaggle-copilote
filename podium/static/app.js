@@ -330,6 +330,7 @@ async function pageCompetition(v, r) {
     <div class="actions"><a class="btn" href="https://www.kaggle.com/competitions/${esc(slug)}" target="_blank" rel="noopener">Kaggle ${icon("ext")}</a>
       ${c.state === "active" ? `<button class="btn" id="cPause">${c.paused ? icon("play") + "Resume" : icon("pause") + "Pause"}</button>` : ""}
       ${IN_PLAY.includes(c.state) ? `<button class="btn danger" id="cStop">Stop</button>` : `<button class="btn primary" id="cStart">${["stopped", "archived"].includes(c.state) ? "Resume" : "Work on it"}</button>`}
+      ${c.kind !== "other" && c.state !== "finished" ? `<button class="btn primary" id="cRun" title="Start it yourself now (no chance bar, no slot limit), optionally with an idea for the next experiment">${icon("play")}Run now</button>` : ""}
       ${c.state === "finished" ? `<button class="btn" id="cPractice" title="Late submissions: scored, never ranked">Practice (late submissions)</button>` : ""}
       ${c.state !== "archived" ? `<button class="btn" id="cArchive" title="Hide from all lists (files and history kept)">Archive</button>` : ""}</div></div>
   ${c.state === "finished" ? `<div class="banner warn">${icon("alert")}<div><b>This competition has ended</b> (${when(c.deadline)}). Late submissions may still be scored, but there is no ranking, medal or prize. Use <b>Practice</b> only to learn or to test a pipeline.</div></div>` : ""}
@@ -345,6 +346,11 @@ async function pageCompetition(v, r) {
   $("#cStop") && ($("#cStop").onclick = () => confirm("Stop working on this competition? It stays stopped until you resume it. Results are kept.") && post(`/api/competitions/${slug}/stop`).then(() => { toast("Stopped. It stays stopped until you resume it."); loadFleet(); render(); }));
   $("#cPractice") && ($("#cPractice").onclick = () => confirm("Work on this ended competition through late submissions? They are scored, but never ranked or awarded.") && post(`/api/competitions/${slug}/practice`).then(() => { toast("Practice mode on."); loadFleet(); render(); }));
   $("#cArchive") && ($("#cArchive").onclick = () => confirm("Archive this competition? It disappears from lists and recommendations; files and history are kept, and you can resume it later.") && post(`/api/competitions/${slug}/archive`).then(() => { toast("Archived."); loadFleet(); go("competitions"); }));
+  $("#cRun") && ($("#cRun").onclick = async () => {
+    const idea = prompt("Optional: what should the next experiment try? (leave empty to just run it now)", "");
+    if (idea === null) return;
+    try { const r = await post(`/api/competitions/${slug}/run`, {idea}); toast(r.note, 6000); loadFleet(); render(); } catch (x) { toast(String(x.message || x), 6000); }
+  });
   $("#cStart") && ($("#cStart").onclick = () => post(`/api/competitions/${slug}/activate`).then(() => { toast("Queued for the Gatekeeper."); render(); }));
   const t = $("#ctab");
   await ({overview: c.state === "project" ? tabProject : tabOverview, leaderboard: tabLeaderboard, strategy: tabStrategy, experiments: tabExperiments,

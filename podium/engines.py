@@ -189,7 +189,7 @@ def llm_engine(task, history):
     best = (max if task["higher_is_better"] else min)(ok, key=lambda h: h["cv_mean"]) if ok else None
     last = history[-1] if history else None
     with_oof = [h for h in ok if Path(h["code_uri"]).with_name("oof.csv").exists()]
-    if len(with_oof) >= 3 and len(history) % BLEND_EVERY == BLEND_EVERY - 1:
+    if len(with_oof) >= 3 and len(history) % BLEND_EVERY == BLEND_EVERY - 1 and "USER REQUEST" not in task.get("feedback", ""):
         top = sorted(with_oof, key=lambda h: h["cv_mean"], reverse=task["higher_is_better"])[:6]
         listing = "\n".join(f"- {h['id']}: CV {h['cv_mean']:.5f} ± {h['cv_std']:.5f} · {h['summary'][:120]}" for h in top)
         text, tokens, cost = llm.complete(BLEND, f"{task['description']}\n\n## Experiments available\n{listing}",

@@ -122,7 +122,7 @@ g.deadline, g.user_has_entered, g.max_daily_submissions, g.team_count = datetime
 g.is_kernels_submissions_only, g.tags, g.submissions_disabled, g.reward = False, [], False, "1,000 Usd"
 class Listing: competitions = [g]
 FakeKaggle.competitions_list = lambda self, **kw: Listing() if kw.get("group") == "entered" else Listing()
-FakeKaggle.competition_list_files = lambda self, *a, **k: type("F", (), {"files": []})()
+FakeKaggle.competition_list_files = lambda self, *a, **k: type("F", (), {"files": [], "next_page_token": None})()
 agents.gatekeeper()
 x = db.one("SELECT * FROM competitions WHERE slug='agent-x'")
 assert x and x["rules_accepted"] == 1 and x["opt_in"] == 1 and x["state"] == "project", x
@@ -131,6 +131,21 @@ assert db.one("SELECT 1 FROM events WHERE type='competition.joined' AND competit
 from podium import api as _api
 _api.stop("c"); agents.gatekeeper()
 assert db.one("SELECT state FROM competitions WHERE slug='c'")["state"] == "stopped"
+# Run now: you start a joined competition yourself; it bypasses the chance bar, the slot limit and the enabled kinds.
+db.x("INSERT INTO competitions (slug,title,metric,kind,deadline,state,higher_is_better,max_daily_submissions,"
+     "rules_accepted,interest_score) VALUES ('m','M','AUC','cv','2099-01-01T00:00:00+00:00','scouted',1,5,1,0)")
+config.MAX_ACTIVE, _kinds = 0, config.KINDS
+r = _api.run_now("m", _api.RunIn(idea="try a ConvNeXt backbone"))
+assert r["joined"] and db.setting("idea:m") == ["try a ConvNeXt backbone"]
+agents.gatekeeper()
+assert db.one("SELECT state FROM competitions WHERE slug='m'")["state"] == "active", db.one("SELECT * FROM competitions WHERE slug='m'")
+db.x("UPDATE competitions SET kind='other' WHERE slug='agent-x'")
+try:
+    _api.run_now("agent-x"); raise AssertionError("agent competitions cannot be run by the fleet")
+except _api.HTTPException:
+    pass
+_api.stop("m"); assert db.setting("idea:m") == []
+config.MAX_ACTIVE = 3
 
 # Tree search: UCB picks a less-explored good branch; every 6th is an exploration draft; deadline -> final round.
 ok_nodes = [{"id": "a", "cv_mean": 0.80, "summary": "x", "parent_id": None},

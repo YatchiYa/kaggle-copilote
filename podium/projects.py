@@ -135,6 +135,7 @@ def baseline(slug, ref=None):
     kdir.mkdir(parents=True, exist_ok=True)
     _kaggle().kernels_pull(src["ref"], str(kdir), metadata=True)
     meta = json.loads((kdir / "kernel-metadata.json").read_text())
+    (kdir / "source-metadata.json").write_text(json.dumps(meta, indent=1))
     user = _kaggle().get_config_value("username")
     name = f"podium-{slug[:24]}-{tag}".lower().replace("_", "-")[:50]
     code = next((p.name for p in kdir.iterdir() if p.suffix in (".ipynb", ".py", ".r", ".R")), None)
@@ -155,28 +156,86 @@ def baseline(slug, ref=None):
     return info
 
 
+DIAGNOSE_PROMPT = """You are a senior Kaggle engineer. A notebook run on Kaggle failed. From its metadata and the tail of
+its log, find the root cause. Reply with JSON only:
+{"cause": "one sentence", "category": "environment|dependency|data_path|gpu|timeout|memory|code|quota|infra",
+ "transient": true/false (true only if simply re-running unchanged can succeed: GPU unavailable, infra hiccup),
+ "fix": "the exact change to make (metadata field, cell, package, path...)",
+ "metadata_patch": {} (only fields of kernel-metadata.json to change if that alone fixes it, e.g. machine_shape,
+                       enable_gpu, docker_image, dataset_sources; otherwise empty)}"""
+SAFE_PATCH = {"machine_shape", "enable_gpu", "enable_internet", "dataset_sources", "model_sources",
+              "competition_sources", "kernel_sources", "docker_image", "docker_image_pinning_type"}
+MAX_RETRIES = 2
+
+
+def diagnose(run_dir, info):
+    """Reflect on a failed run: read its log, ask for the root cause and fix, apply safe fixes and re-run."""
+    out = run_dir / "output"
+    out.mkdir(exist_ok=True)
+    try:
+        _kaggle().kernels_output(info["ref"], str(out), force=True)
+    except Exception:
+        pass
+    log = "".join(p.read_text(errors="replace") for p in sorted(out.glob("*.log")))[-8000:]
+    meta_f = run_dir / "kernel" / "kernel-metadata.json"
+    meta = json.loads(meta_f.read_text()) if meta_f.exists() else {}
+    refs = [json.loads(f.read_text()) for f in sorted(run_dir.parent.parent.glob("experiments/reference/*/kernel-metadata.json"))]
+    refs += [json.loads(f.read_text()) for f in [run_dir / "kernel" / "source-metadata.json"] if f.exists()]
+    known = "\n".join(json.dumps({k: m.get(k) for k in SAFE_PATCH | {"id"} if m.get(k) is not None}) for m in refs)
+    ctx = (f"Known-good metadata of the official/source notebooks (copy fields from here if they fix it):\n{known or 'none'}\n\n"
+           f"Kaggle failure message: {info.get('failure') or ''}\n\nkernel-metadata.json:\n"
+           f"{json.dumps({k: v for k, v in meta.items() if k != 'id_no'}, indent=1)}\n\nLog tail:\n{log}")
+    try:
+        text, tokens, cost = llm.complete(DIAGNOSE_PROMPT, ctx, role="review", agent="Critic", purpose="run diagnosis",
+                                          competition=info.get("competition"))
+        d = json.loads(text[text.index("{"):text.rindex("}") + 1])
+    except Exception as e:
+        d = {"cause": f"could not diagnose automatically: {str(e)[:200]}", "transient": False, "fix": "", "metadata_patch": {}}
+    patch = {k: v for k, v in (d.get("metadata_patch") or {}).items() if k in SAFE_PATCH}
+    d["at"] = db.now()
+    (run_dir / "diagnosis.json").write_text(json.dumps(d, indent=1))
+    retry = (d.get("transient") or patch) and info.get("retries", 0) < MAX_RETRIES and meta_f.exists()
+    if retry:
+        meta.update(patch)
+        meta_f.write_text(json.dumps(meta, indent=1))
+        resp = _kaggle().kernels_push(str(meta_f.parent))
+        info.update(version=getattr(resp, "version_number", info.get("version")), retries=info.get("retries", 0) + 1,
+                    status="queued", failed=False)
+    db.emit("Critic", "project.run_failed", {"run": run_dir.name, "cause": d.get("cause"), "fix": d.get("fix"),
+                                             "retried": bool(retry), "patch": patch}, competition=info.get("competition"))
+    return d
+
+
 def track():
-    """Follow project baseline runs; submit finished ones (code competitions) once."""
+    """Every project Kaggle run (baselines, dev runs): follow it; on error reflect, fix and retry;
+    submit finished baselines (code competitions) once."""
     for c in db.q("SELECT * FROM competitions WHERE state='project'"):
         d = project_dir(c["slug"])
         for rj in sorted((d / "runs").glob("*/run.json")) if (d / "runs").exists() else []:
             info = json.loads(rj.read_text())
-            if not info.get("submit_after") or info.get("submitted") or info.get("failed"):
+            if info.get("submitted") or info.get("failed") or info.get("collected") or \
+                    time.time() - info.get("checked", 0) < 120:
                 continue
-            if time.time() - info.get("checked", 0) < 120:
-                continue
-            info["checked"] = time.time()
+            info["checked"], info["competition"] = time.time(), c["slug"]
             try:
                 st = _kaggle().kernels_status(info["ref"])
                 status = str(getattr(st, "status", st)).split(".")[-1].lower()
+                info["failure"] = getattr(st, "failure_message", "") or ""
             except Exception:
                 rj.write_text(json.dumps(info, indent=1))
                 continue
             info["status"] = status
             if status in ("error", "cancelacknowledged"):
-                info["failed"] = True
-                db.emit("Gatekeeper", "agent.error", {"error": f"baseline notebook {info['ref']} ended with {status}: "
-                                                               f"{getattr(st, 'failure_message', '')}"}, competition=c["slug"])
+                diag = diagnose(rj.parent, info)
+                info["failed"] = info.get("status") != "queued"  # not retried: needs a code fix
+                info["cause"] = diag.get("cause")
+            elif status == "complete" and not info.get("submit_after"):
+                info["collected"] = True
+                try:
+                    _kaggle().kernels_output(info["ref"], str(rj.parent / "output"), force=True)
+                except Exception:
+                    pass
+                db.emit("Gatekeeper", "project.run_done", {"run": rj.parent.name}, competition=c["slug"])
             elif status == "complete":
                 out = rj.parent / "output"
                 out.mkdir(exist_ok=True)
