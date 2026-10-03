@@ -1,0 +1,10 @@
+.env
+kaggle.json
+docs/kaggle/info.md
+data/
+.venv/
+__pycache__/
+
+# competition data must not be redistributed (rules 2.4)
+projects/*/data/
+projects/*/experiments/runs/

@@ -1,0 +1,24 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PODIUM_FLEET: "0"          # never run the fleet in CI
+      PODIUM_MODEL: "none"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Python env
+        run: uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt
+      - name: Sandbox image
+        run: docker build -q -t podium-sandbox sandbox/
+      - name: Offline tests (engine, sandbox, critic, review gate, quotas, joins, stop, tree search)
+        run: .venv/bin/python test_podium.py && .venv/bin/python -m podium.copilot
+      - name: End-to-end UI (dashboard only)
+        run: |
+          touch .env
+          nohup .venv/bin/python -m podium --no-fleet > server.log 2>&1 &
+          sleep 8
+          uv run --with playwright playwright install --with-deps chromium
+          uv run --with playwright python tests/e2e_ui.py

@@ -1,0 +1,9 @@
+# Python 3.12 (installed automatically by `make setup` via uv). Versions verified together on 2026-10-03.
+kaggle>=2.2.4,<3
+google-adk>=2.11,<3
+litellm>=1.103,<2
+fastapi>=0.141
+uvicorn>=0.54
+pandas>=3.0,<4
+numpy>=2.5
+scikit-learn>=1.9

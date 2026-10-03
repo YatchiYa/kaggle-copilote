@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>Podium</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="shell" id="shell">
+  <aside class="sidebar" id="sidebar" aria-label="Main navigation">
+    <div class="brand"><span class="logo" aria-hidden="true">P</span><div><b>Podium</b><small>Autonomous Kaggle fleet</small></div></div>
+    <nav id="nav"></nav>
+    <div class="side-foot" id="sideFoot"></div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="menuBtn" aria-label="Open menu"></button>
+      <div class="crumbs" id="crumbs"></div>
+      <div class="top-actions">
+        <span class="live" id="live"><i class="dot"></i><span>connecting</span></span>
+        <button class="btn primary" id="copilotBtn" aria-label="Open Copilot"></button>
+        <button class="icon-btn" id="bellBtn" aria-label="Alerts"><span class="bell-count" id="bellCount" hidden></span></button>
+        <button class="btn" id="fleetBtn"></button>
+      </div>
+      <div class="alert-pop" id="alertPop" hidden></div>
+    </header>
+    <main id="view" class="content" tabindex="-1"></main>
+  </div>
+</div>
+<aside class="copilot" id="copilot" hidden aria-label="Podium Copilot">
+  <div class="cp-head"><span class="logo" aria-hidden="true">✦</span><div><b>Podium Copilot</b><small id="cpSub">Knows your whole fleet · can act on it</small></div>
+    <button class="icon-btn" id="cpNew" title="New conversation" aria-label="New conversation"></button>
+    <button class="icon-btn" id="cpClose" aria-label="Close Copilot"></button></div>
+  <div class="cp-body" id="cpBody"></div>
+  <form class="cp-input" id="cpForm">
+    <div class="cp-compose" id="cpCompose">
+      <div class="cp-atts" id="cpAtts"></div>
+      <textarea id="cpText" rows="1" placeholder="Ask anything, or tell it what to do…  (drop or paste files and images)" aria-label="Message"></textarea>
+      <div class="cp-bar">
+        <button type="button" class="cp-icon" id="cpAttach" title="Attach files or images" aria-label="Attach files"></button>
+        <input type="file" id="cpFile" multiple hidden>
+        <span class="cp-hint">Enter to send · Shift+Enter for a new line</span>
+        <button class="btn primary cp-send" id="cpSend" aria-label="Send">Send</button>
+      </div>
+    </div>
+    <div class="cp-drop" id="cpDrop" hidden>Drop files to attach</div>
+  </form>
+</aside>
+<div class="modal" id="modal" hidden><div class="modal-card"><div class="modal-head"><b id="modalTitle"></b>
+  <button class="icon-btn" id="modalClose" aria-label="Close"></button></div><div class="modal-body" id="modalBody"></div></div></div>
+<div class="toast" id="toast" hidden></div>
+<div class="tip" id="tip"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
