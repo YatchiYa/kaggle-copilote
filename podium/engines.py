@@ -346,12 +346,22 @@ def execute(code, task_dir, out_dir, prev_dir=None, name=None):
                "PODIUM_OUT": str(out_dir.resolve()),
                "PODIUM_PREV": str(prev_dir.resolve()) if prev_dir else "",
                "PODIUM_EXTERNAL": str(ext.resolve()) if ext.exists() else "", "PODIUM_WORK": str(work.resolve())}
+    if name and config.SANDBOX == "docker":  # a stale container with this name (e.g. from a restart) blocks the run
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     t0 = time.time()
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=config.EXPERIMENT_TIMEOUT_S)
         log = p.stdout[-20000:] + "\n" + p.stderr[-20000:]
+        if p.returncode:
+            hint = {137: f"killed: OUT OF MEMORY (container limit {mem_gb} GB). Use float32, fewer/lighter features "
+                         "held at once, smaller batches, del + gc.collect() between folds.",
+                    124: "timed out."}.get(p.returncode, "the script exited with an error (see traceback above).")
+            log += f"\n[podium] container exit code {p.returncode}: {hint}"
     except subprocess.TimeoutExpired:
-        log = f"TIMEOUT after {config.EXPERIMENT_TIMEOUT_S}s"
+        log = f"TIMEOUT after {config.EXPERIMENT_TIMEOUT_S}s: the experiment must finish within " \
+              f"{config.EXPERIMENT_TIMEOUT_S // 60} minutes (fewer folds/seeds/rounds, or cache features in PODIUM_WORK)."
+        if name and config.SANDBOX == "docker":
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     (out_dir / "log.txt").write_text(log)
     res = re.findall(r"PODIUM_RESULT (\{.*\})", log)
     if not res:

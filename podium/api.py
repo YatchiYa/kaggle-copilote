@@ -150,6 +150,7 @@ def spend():
     per_comp = db.q("SELECT competition, SUM(cost_usd) usd, SUM(tokens) tokens FROM events "
                     "WHERE competition IS NOT NULL GROUP BY competition HAVING SUM(tokens) > 0 OR SUM(cost_usd) > 0")
     return {"by_agent": week, "by_competition": per_comp, "week_usd": agents.spend(days=7)["usd"],
+            "week_billed_usd": agents.billed_spend(days=7),
             "weekly_cap_usd": db.setting("weekly_cap_usd", config.WEEKLY_CAP_USD)}
 
 
@@ -374,6 +375,55 @@ def stop(slug: str):
     db.x("UPDATE human_tasks SET status='done' WHERE competition_slug=? AND status='open'", slug)
     db.emit("Human", "competition.stopped", {}, competition=slug)
     return {"ok": True}
+
+
+@app.get("/api/competitions/{slug}/project")
+def project_info(slug: str):
+    from . import projects
+    d = projects.project_dir(slug)
+    plan = d / "PLAN.md"
+    nbs = d / "public_notebooks.json"
+    return {"dir": str(d.relative_to(config.ROOT)), "plan": plan.read_text() if plan.exists() else None,
+            "notebooks": json.loads(nbs.read_text()) if nbs.exists() else [], "runs": _devruns(d),
+            "kaggle": db.setting(f"proj:{slug}", {})}
+
+
+@app.post("/api/competitions/{slug}/project/bootstrap")
+def project_bootstrap(slug: str):
+    """(Re)write the project plan: official pages, top public notebooks, expert PLAN.md with a timeline."""
+    from . import projects
+    try:
+        return projects.bootstrap(slug, force=True)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+class BaselineIn(BaseModel):
+    ref: str | None = None
+
+
+@app.post("/api/competitions/{slug}/project/baseline")
+def project_baseline(slug: str, body: BaselineIn = BaselineIn()):
+    """Fork the best public notebook privately, run it on Kaggle, submit it when it finishes (uses 1 submission)."""
+    from . import projects
+    if not db.one("SELECT 1 FROM competitions WHERE slug=?", slug):
+        raise HTTPException(404)
+    try:
+        return projects.baseline(slug, body.ref)
+    except Exception as e:
+        raise HTTPException(400, str(e)[:300])
+
+
+@app.post("/api/competitions/{slug}/practice")
+def practice(slug: str):
+    """Work on an ENDED competition through late submissions (scored, never ranked)."""
+    c = db.one("SELECT * FROM competitions WHERE slug=?", slug)
+    if not c:
+        raise HTTPException(404)
+    db.x("UPDATE competitions SET practice=1, opt_in=1, paused=0, state='needs_rules' WHERE slug=?", slug)
+    db.x("UPDATE runs SET status='done' WHERE competition_slug=? AND status='running'", slug)
+    db.emit("Human", "competition.practice", {"title": c["title"]}, competition=slug)
+    return {"ok": True, "note": "Practice mode: late submissions are scored but not ranked."}
 
 
 @app.post("/api/competitions/{slug}/archive")
@@ -842,10 +892,10 @@ def ongoing():
             for s, c in comps.items() if c["state"] == "active" and c["paused"]]
     if db.setting("fleet_paused", False):
         you.append({"kind": "paused", "competition": None, "what": "the whole fleet is paused"})
-    week = agents.spend(days=7)["usd"]
+    week = agents.billed_spend(days=7)
     cap = db.setting("weekly_cap_usd", config.WEEKLY_CAP_USD)
     if week >= 0.9 * cap:
-        you.append({"kind": "budget", "competition": None, "what": f"weekly AI budget ${week:.2f} of ${cap:.0f}: the fleet pauses at the cap (Settings > Budgets)"})
+        you.append({"kind": "budget", "competition": None, "what": f"weekly billed AI spend ${week:.2f} of ${cap:.0f}: the fleet pauses at the cap (Settings > Budgets)"})
     # coming up
     nxt = []
     midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -881,3 +931,200 @@ def engines_where(c):
         return engines.executor_for(dict(c))[0]
     except Exception:
         return "docker"
+
+
+# ---------------------------------------------------------------- Copilot conversations (server-side, resumable)
+class ConvIn(BaseModel):
+    title: str | None = None
+
+
+class SendIn(BaseModel):
+    content: str
+    attachments: list[dict] = []
+    context: str | None = None
+
+
+class ImportIn(BaseModel):
+    messages: list[dict]
+
+
+@app.get("/api/copilot/convs")
+def convs(q: str = ""):
+    from . import copilot
+    rows = db.q("SELECT c.*, (SELECT content FROM copilot_msgs m WHERE m.conv_id=c.id ORDER BY id DESC LIMIT 1) last, "
+                "(SELECT COUNT(*) FROM copilot_msgs m WHERE m.conv_id=c.id) n FROM copilot_convs c "
+                "WHERE c.title LIKE ? OR EXISTS (SELECT 1 FROM copilot_msgs m WHERE m.conv_id=c.id AND m.content LIKE ?) "
+                "ORDER BY c.updated_at DESC LIMIT 200", f"%{q}%", f"%{q}%")
+    live = {r["conv_id"] for r in copilot.RUNS.values() if not r["done"]}
+    for r in rows:
+        r["running"] = r["id"] in live
+        r["last"] = (r["last"] or "")[:140]
+    return rows
+
+
+@app.post("/api/copilot/convs")
+def conv_new(c: ConvIn):
+    cid, now = db.new_id("cv"), db.now()
+    db.x("INSERT INTO copilot_convs (id, title, created_at, updated_at) VALUES (?,?,?,?)", cid, c.title or "New conversation", now, now)
+    return {"id": cid}
+
+
+@app.get("/api/copilot/convs/{cid}")
+def conv_get(cid: str):
+    from . import copilot
+    c = db.one("SELECT * FROM copilot_convs WHERE id=?", cid)
+    if not c:
+        raise HTTPException(404)
+    msgs = copilot.conv_messages(cid)
+    for m in msgs:
+        r = copilot.RUNS.get(m["run_id"] or "")
+        m["live"] = bool(r and not r["done"])
+    return {**c, "messages": msgs}
+
+
+@app.patch("/api/copilot/convs/{cid}")
+def conv_rename(cid: str, c: ConvIn):
+    db.x("UPDATE copilot_convs SET title=? WHERE id=?", (c.title or "Conversation")[:120], cid)
+    return {"ok": True}
+
+
+@app.delete("/api/copilot/convs/{cid}")
+def conv_delete(cid: str):
+    db.x("DELETE FROM copilot_msgs WHERE conv_id=?", cid)
+    db.x("DELETE FROM copilot_convs WHERE id=?", cid)
+    return {"ok": True}
+
+
+@app.post("/api/copilot/convs/{cid}/send")
+def conv_send(cid: str, body: SendIn):
+    from . import copilot
+    if not db.one("SELECT 1 FROM copilot_convs WHERE id=?", cid):
+        raise HTTPException(404)
+    if any(r["conv_id"] == cid and not r["done"] for r in copilot.RUNS.values()):
+        raise HTTPException(409, "an answer is still streaming in this conversation")
+    atts = [a for a in body.attachments[:8] if isinstance(a, dict)]
+    run_id, msg_id = copilot.start_run(cid, body.content[:8000], atts, body.context)
+    return {"run_id": run_id, "msg_id": msg_id}
+
+
+@app.post("/api/copilot/convs/import")
+def conv_import(body: ImportIn):
+    """One-time import of a conversation kept in the browser (older versions)."""
+    cid, now = db.new_id("cv"), db.now()
+    first = next((m.get("content", "") for m in body.messages if m.get("role") == "user"), "Imported conversation")
+    db.x("INSERT INTO copilot_convs (id, title, created_at, updated_at) VALUES (?,?,?,?)", cid, first[:70], now, now)
+    for m in body.messages[-200:]:
+        db.x("INSERT INTO copilot_msgs (conv_id, role, content, attachments, steps, suggestions, created_at) VALUES (?,?,?,?,?,?,?)",
+             cid, m.get("role", "user"), str(m.get("content", ""))[:20000], json.dumps(m.get("attachments") or []),
+             json.dumps(m.get("steps") or []), json.dumps(m.get("suggestions") or []), now)
+    return {"id": cid}
+
+
+@app.get("/api/copilot/runs/{run_id}/events")
+async def run_events(run_id: str, request: Request, after: int = 0):
+    """Replay a run's events from `after`, then follow it live (works again after a page refresh)."""
+    from . import copilot
+
+    async def gen():
+        i = after
+        while True:
+            run = copilot.RUNS.get(run_id)
+            if not run:
+                yield f"data: {json.dumps({'type': 'end', 'status': 'gone'})}\n\n"
+                return
+            evs = run["events"]
+            while i < len(evs):
+                yield f"data: {json.dumps({**evs[i], 'i': i}, default=str)}\n\n"
+                i += 1
+            if run["done"] and i >= len(run["events"]):
+                return
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(0.15)
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/copilot/runs/{run_id}/stop")
+def run_stop(run_id: str):
+    from . import copilot
+    r = copilot.RUNS.get(run_id)
+    if r:
+        r["stop"].set()
+    return {"ok": bool(r)}
+
+
+# ---------------------------------------------------------------- add a competition by hand / scan recent launches
+class AddIn(BaseModel):
+    query: str
+
+
+def _slug_of(q):
+    q = q.strip()
+    m = _re.search(r"kaggle\.com/(?:competitions|c)/([A-Za-z0-9_-]+)", q)
+    return m.group(1) if m else (q if _re.fullmatch(r"[A-Za-z0-9_-]+", q) else None)
+
+
+@app.post("/api/competitions/add")
+def add_competition(body: AddIn):
+    """Add a competition from a Kaggle URL, a slug or a name. Live ones are opted in; ended ones are reported."""
+    q = body.query.strip()
+    if not q:
+        raise HTTPException(400, "enter a Kaggle URL, slug or name")
+    slug = _slug_of(q)
+    found = None
+    for term in [slug, q] if slug else [q]:
+        try:
+            r = agents.kaggle().competitions_list(search=term)
+        except Exception as e:
+            raise HTTPException(502, f"Kaggle search failed: {str(e)[:200]}")
+        cs = r.competitions or []
+        found = next((c for c in cs if c.ref.rstrip("/").split("/")[-1].lower() == (slug or "").lower()), None) or \
+            (cs[0] if cs and not slug else None)
+        if found:
+            break
+    if not found:
+        raise HTTPException(404, f"No Kaggle competition found for '{q}'")
+    s = found.ref.rstrip("/").split("/")[-1]
+    now = datetime.now(timezone.utc)
+    ended = bool(found.deadline and found.deadline.replace(tzinfo=timezone.utc) < now)
+    agents.upsert_competition(found, now)
+    if ended:
+        db.x("UPDATE competitions SET state='finished' WHERE slug=?", s)
+    else:
+        db.x("UPDATE competitions SET opt_in=1, state=CASE WHEN state IN ('scouted','stopped','archived','finished') "
+             "THEN 'scouted' ELSE state END WHERE slug=?", s)
+        if not found.user_has_entered:
+            db.open_task(s, "accept_rules", f"https://www.kaggle.com/competitions/{s}/rules",
+                         f"You added {found.title}. Join it on Kaggle (accept the rules); the fleet starts right after.")
+    c = db.one("SELECT * FROM competitions WHERE slug=?", s)
+    db.emit("Human", "competition.added", {"title": found.title, "ended": ended}, competition=s)
+    return {"slug": s, "title": found.title, "ended": ended, "joined": bool(found.user_has_entered), "kind": c["kind"],
+            "chance": c["interest_score"], "deadline": c["deadline"], "state": c["state"],
+            "note": ("This competition has ENDED: late submissions may still be scored, but there is no ranking to win."
+                     if ended else "Opted in." + ("" if found.user_has_entered else " Join it on Kaggle to start (a Decision was opened).")
+                     + ("" if c["kind"] in config.KINDS else f" Its kind '{c['kind']}' is not enabled for the fleet (Settings > kinds): it will be a dedicated project."))}
+
+
+@app.post("/api/scout/scan")
+def scan(days: int = 30):
+    """Fetch every competition launched in the last `days` days (live ones), score and list them."""
+    now, since, seen, new = datetime.now(timezone.utc), datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 365))), [], 0
+    for page in range(1, 16):
+        r = agents.kaggle().competitions_list(sort_by="recentlyCreated", page=page)
+        cs = r.competitions or []
+        stop = False
+        for c in cs:
+            launched = getattr(c, "enabled_date", None) or getattr(c, "date_created", None)  # launch date, not draft date
+            created = launched.replace(tzinfo=timezone.utc) if launched else None
+            if created and created < since:
+                stop = True
+                continue
+            if c.deadline and c.deadline.replace(tzinfo=timezone.utc) > now and not c.submissions_disabled:
+                new += agents.upsert_competition(c, now)
+                seen.append(c.ref.rstrip("/").split("/")[-1])
+        if (stop and page >= 3) or len(cs) < 20:  # listing is by creation date: scan a few pages past the cutoff
+            break
+    db.emit("Scout", "scout.done", {"listed": len(seen), "new": new, "days": days})
+    rows = db.q(f"SELECT slug, title, kind, category, interest_score, deadline, rules_accepted, state FROM competitions "
+                f"WHERE slug IN ({','.join('?' * len(seen))}) ORDER BY interest_score DESC", *seen) if seen else []
+    return {"days": days, "found": len(seen), "new": new, "competitions": rows}

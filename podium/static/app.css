@@ -250,3 +250,9 @@ input:focus, select:focus, button:focus-visible, .nav-item:focus-visible { outli
 
 th.sortable { cursor: pointer; user-select: none; } th.sortable:hover { color: var(--ink); }
 th[aria-sort="ascending"], th[aria-sort="descending"] { color: var(--accent); }
+
+.cp-hist-head { margin-bottom: 8px; } .cp-hist-head input { width: 100%; }
+.cp-conv { display: flex; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); margin-bottom: 8px; cursor: pointer; }
+.cp-conv:hover, .cp-conv.on { border-color: var(--accent); } .cp-conv-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cp-conv-main b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .cp-conv-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-conv-act { display: flex; flex-direction: column; gap: 2px; }

@@ -221,7 +221,12 @@ async function pageCompetitions(v, r) {
   const groups = {play: c => IN_PLAY.includes(c.state), rec: c => c.state === "scouted" && c.interest_score >= f.config.min_chance,
                   stopped: c => ["stopped", "archived"].includes(c.state), all: c => c.state !== "archived"};
   const kinds = [...new Set(f.competitions.map(c => c.kind))].sort(), cats = [...new Set(f.competitions.map(c => c.category).filter(Boolean))].sort();
-  v.innerHTML = `<div class="page-head"><div><h1>Competitions</h1><p>Rank chance is how likely the fleet is to place well (hover it for the reasons). Click a column to sort.</p></div></div>
+  v.innerHTML = `<div class="page-head"><div><h1>Competitions</h1><p>Rank chance is how likely the fleet is to place well (hover it for the reasons). Click a column to sort.</p></div>
+    <div class="actions"><form id="addForm" style="display:flex;gap:6px"><input id="addQ" type="text" placeholder="Add: Kaggle URL, slug or name" style="min-width:260px" aria-label="Add a competition">
+      <button class="btn primary">Add</button></form>
+      <div style="display:flex;gap:6px"><select id="scanDays" aria-label="Scan period">${[7, 14, 30, 60, 90].map(n => `<option value="${n}" ${n === 30 ? "selected" : ""}>last ${n} days</option>`).join("")}</select>
+      <button class="btn" id="scanBtn" title="Fetch every competition launched in this period">${icon("search")}Scan Kaggle</button></div></div></div>
+  <div id="addResult">${S.addMsg || ""}</div>
   <div class="filters">
     <div class="seg">${[["play", "In play"], ["rec", "Recommended"], ["stopped", "Stopped & archived"], ["all", "All live"]].map(([k, l]) =>
       `<button aria-pressed="${filt === k}" data-f="${k}">${l}</button>`).join("")}</div>
@@ -251,6 +256,31 @@ async function pageCompetitions(v, r) {
   };
   const save = () => { store.set("ctable", CT); draw(); };
   $$(".seg button", v).forEach(b => b.onclick = () => go(`competitions/${b.dataset.f}`));
+  const showMsg = html => { S.addMsg = html ? `<div style="position:relative">${html}<button class="cp-mini" id="addClose" style="position:absolute;top:8px;right:8px" aria-label="Dismiss">×</button></div>` : null;
+    $("#addResult").innerHTML = S.addMsg || ""; $("#addClose") && ($("#addClose").onclick = () => showMsg(null)); };
+  $("#addClose") && ($("#addClose").onclick = () => showMsg(null));
+  $("#addForm").onsubmit = async e => {
+    e.preventDefault(); const q = $("#addQ").value.trim(); if (!q) return;
+    showMsg(`<div class="banner info">${icon("search")}<div>Looking up <b>${esc(q)}</b> on Kaggle…</div></div>`);
+    try {
+      const r = await post("/api/competitions/add", {query: q});
+      showMsg(`<div class="banner ${r.ended ? "warn" : "info"}">${icon(r.ended ? "alert" : "check")}<div><b><a href="#/competition/${esc(r.slug)}">${esc(r.title)}</a></b>
+        · ${esc(r.kind)} · chance ${(r.chance || 0) | 0} · deadline ${when(r.deadline)} · ${r.joined ? "joined" : "not joined yet"}<br>${esc(r.note)}</div></div>`);
+      $("#addQ").value = ""; await loadFleet();
+    } catch (err) { showMsg(`<div class="banner bad">${icon("alert")}<div>${esc(err.message)}</div></div>`); }
+  };
+  $("#scanBtn").onclick = async () => {
+    const days = $("#scanDays").value; $("#scanBtn").disabled = true;
+    showMsg(`<div class="banner info">${icon("search")}<div>Scanning Kaggle for competitions launched in the last ${days} days…</div></div>`);
+    try {
+      const r = await post(`/api/scout/scan?days=${days}`);
+      showMsg(`<div class="banner info">${icon("check")}<div><b>${r.found} live competitions launched in the last ${days} days</b> (${r.new} new to Podium):
+        ${r.competitions.map(c => `<a href="#/competition/${esc(c.slug)}">${esc(c.title)}</a> <span class="muted">(${esc(c.kind)}, chance ${(c.interest_score || 0) | 0}${c.rules_accepted ? ", joined" : ""})</span>`).join(" · ") || "none"}</div></div>`);
+      await loadFleet();
+      if (filt === "all") { render(); } else go("competitions/all");
+    } catch (err) { showMsg(`<div class="banner bad">${icon("alert")}<div>${esc(err.message)}</div></div>`); }
+    $("#scanBtn") && ($("#scanBtn").disabled = false);
+  };
   $$("th.sortable", v).forEach(th => th.onclick = () => { CT.dir = CT.sort === th.dataset.sort ? -CT.dir : (th.dataset.sort === "name" || th.dataset.sort === "rank" || th.dataset.sort === "deadline" ? 1 : -1);
     CT.sort = th.dataset.sort; store.set("ctable", CT); render(); });
   $("#ctQ").oninput = e => { CT.q = e.target.value; save(); };
@@ -296,12 +326,15 @@ async function pageCompetition(v, r) {
   v.innerHTML = `<div class="page-head"><div style="min-width:0"><h1>${esc(c.title)}</h1>
       <p>${stateBadge(fc)} <span class="badge">${esc(c.metric)} · ${c.higher_is_better ? "higher" : "lower"} is better</span>
       <span class="badge">${c.lb_teams || c.team_count || "?"} teams</span> <span class="badge">${daysLeft(c.deadline)} days left</span>
-      <span class="badge accent" data-tip="${esc(c.why || "")}">Rank chance ${(c.interest_score || 0) | 0}</span></p></div>
+      ${c.state === "project" ? "" : `<span class="badge accent" data-tip="${esc(c.why || "")}">Rank chance ${(c.interest_score || 0) | 0}</span>`}</p></div>
     <div class="actions"><a class="btn" href="https://www.kaggle.com/competitions/${esc(slug)}" target="_blank" rel="noopener">Kaggle ${icon("ext")}</a>
       ${c.state === "active" ? `<button class="btn" id="cPause">${c.paused ? icon("play") + "Resume" : icon("pause") + "Pause"}</button>` : ""}
       ${IN_PLAY.includes(c.state) ? `<button class="btn danger" id="cStop">Stop</button>` : `<button class="btn primary" id="cStart">${["stopped", "archived"].includes(c.state) ? "Resume" : "Work on it"}</button>`}
+      ${c.state === "finished" ? `<button class="btn" id="cPractice" title="Late submissions: scored, never ranked">Practice (late submissions)</button>` : ""}
       ${c.state !== "archived" ? `<button class="btn" id="cArchive" title="Hide from all lists (files and history kept)">Archive</button>` : ""}</div></div>
-  ${c.state === "project" ? `<div class="banner info">${icon("brain")}<div><b>Dedicated project.</b> You joined this competition; it is not a file-submission competition, so it is built as a dedicated project (see <span class="mono">projects/</span>) rather than by the fleet. Submissions and scores still appear in the Submissions tab.</div></div>` : ""}
+  ${c.state === "finished" ? `<div class="banner warn">${icon("alert")}<div><b>This competition has ended</b> (${when(c.deadline)}). Late submissions may still be scored, but there is no ranking, medal or prize. Use <b>Practice</b> only to learn or to test a pipeline.</div></div>` : ""}
+  ${c.practice && c.state !== "finished" ? `<div class="banner info">${icon("flask")}<div><b>Practice mode</b>: late submissions, scored but not ranked.</div></div>` : ""}
+  ${c.state === "project" ? `<div class="banner info">${icon("brain")}<div><b>Dedicated project.</b> You joined this competition; it is not a file-submission competition, so it is run as a dedicated project: Podium writes its plan, can launch a public baseline on Kaggle, and tracks every submission, score and rank.</div></div>` : ""}
   ${c.state === "stopped" ? `<div class="banner warn">${icon("pause")}<div><b>Stopped.</b> The fleet will not touch it until you click Resume.</div></div>` : ""}
   ${d.gap.diverged ? `<div class="banner warn">${icon("alert")}<div><b>CV and the public leaderboard disagree</b> (gap ${num(d.gap.cv_lb_gap)}). The strategist is told to fix validation before chasing CV gains.</div></div>` : ""}
   ${c.paused && c.note ? `<div class="banner bad">${icon("alert")}<div><b>Paused:</b> ${esc(c.note)}. Raise the cap in the Overview tab to resume.</div></div>` : ""}
@@ -310,11 +343,34 @@ async function pageCompetition(v, r) {
   $$(".tab", v).forEach(b => b.onclick = () => go(`competition/${slug}/${b.dataset.t}`));
   $("#cPause") && ($("#cPause").onclick = () => post(`/api/competitions/${slug}/pause`).then(() => { toast("Updated."); render(); }));
   $("#cStop") && ($("#cStop").onclick = () => confirm("Stop working on this competition? It stays stopped until you resume it. Results are kept.") && post(`/api/competitions/${slug}/stop`).then(() => { toast("Stopped. It stays stopped until you resume it."); loadFleet(); render(); }));
+  $("#cPractice") && ($("#cPractice").onclick = () => confirm("Work on this ended competition through late submissions? They are scored, but never ranked or awarded.") && post(`/api/competitions/${slug}/practice`).then(() => { toast("Practice mode on."); loadFleet(); render(); }));
   $("#cArchive") && ($("#cArchive").onclick = () => confirm("Archive this competition? It disappears from lists and recommendations; files and history are kept, and you can resume it later.") && post(`/api/competitions/${slug}/archive`).then(() => { toast("Archived."); loadFleet(); go("competitions"); }));
   $("#cStart") && ($("#cStart").onclick = () => post(`/api/competitions/${slug}/activate`).then(() => { toast("Queued for the Gatekeeper."); render(); }));
   const t = $("#ctab");
-  await ({overview: tabOverview, leaderboard: tabLeaderboard, strategy: tabStrategy, experiments: tabExperiments,
+  await ({overview: c.state === "project" ? tabProject : tabOverview, leaderboard: tabLeaderboard, strategy: tabStrategy, experiments: tabExperiments,
           submissions: tabSubmissions, files: tabFiles}[tab] || tabOverview)(t, d, slug);
+}
+
+async function tabProject(t, d, slug) {
+  const c = d.competition, p = await api(`/api/competitions/${slug}/project`), k = p.kaggle || {};
+  const st = r => r.status === "complete" ? "ok" : ["error", "cancelacknowledged"].includes(r.status) ? "bad" : "warn";
+  t.innerHTML = `<div class="grid g-kpi" style="margin-bottom:16px">
+    ${kpi("Public rank", c.lb_rank ? `#${c.lb_rank}` : "—", c.lb_rank ? `of ${c.lb_teams} · top ${pct(c.lb_rank, c.lb_teams)}` : "no scored submission yet", "target")}
+    ${kpi("Best public score", num(k.best, 5), `${k.count || 0} Kaggle submission(s)`, "trophy")}
+    ${kpi("Latest submission", esc(k.status || "none"), esc(k.latest || ""), "upload")}
+    ${kpi("Deadline", `${daysLeft(c.deadline)} days`, when(c.deadline), "activity")}</div>
+  <div class="card" style="margin-bottom:16px"><div class="card-h"><h3>Project actions</h3><span class="sub mono">${esc(p.dir)}</span></div><div class="card-b">
+    <p class="muted">Public baseline: forks the best-scoring public notebook as a <b>private</b> notebook under your account, runs it on Kaggle (your GPU quota) and submits it when it finishes (1 submission). It puts you on the leaderboard; the plan says how to improve from there.</p>
+    <div class="actions"><button class="btn primary" id="pBase">${icon("play")}Run public baseline</button>
+    <button class="btn" id="pPlan">${icon("brain")}${p.plan ? "Rewrite plan" : "Write plan now"}</button></div></div></div>
+  <div class="grid g-2" style="margin-bottom:16px">
+    <div class="card"><div class="card-h"><h3>Kaggle runs</h3></div><div class="card-b">${p.runs.length ? `<div class="table-wrap"><table><thead><tr><th>Run</th><th>From</th><th>Status</th></tr></thead><tbody>${p.runs.map(r => `<tr><td class="mono">${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.tag)}</a>` : esc(r.tag)}</td><td>${esc(r.agent)}</td><td><span class="badge ${st(r)}">${esc(r.status || "?")}</span> ${esc(r.failure || "")}</td></tr>`).join("")}</tbody></table></div>` : `<p class="muted">No run yet.</p>`}</div></div>
+    <div class="card"><div class="card-h"><h3>Top public notebooks</h3></div><div class="card-b">${p.notebooks.length ? `<ul>${p.notebooks.map(n => `<li><a href="https://www.kaggle.com/code/${esc(n.ref)}" target="_blank" rel="noopener">${esc(n.title)}</a> <span class="muted">${n.votes ?? "?"} votes · ${n.by === "voteCount" ? "most voted" : "best score"}</span></li>`).join("")}</ul>` : `<p class="muted">Fetched with the plan.</p>`}</div></div></div>
+  <div class="card"><div class="card-h"><h3>Plan</h3></div><div class="card-b md">${p.plan ? md(p.plan) : `<p class="muted">The Strategist writes the plan automatically within a few minutes of joining (official pages, top notebooks, web research).</p>`}</div></div>`;
+  $("#pBase").onclick = async e => { if (!confirm("Fork the best public notebook privately, run it on Kaggle and submit it when it finishes (uses GPU quota and 1 submission)?")) return;
+    e.target.disabled = true; try { const r = await post(`/api/competitions/${slug}/project/baseline`); toast(r.error ? `Kaggle: ${r.error}` : `Launched ${r.ref}.`); } catch (x) { toast(String(x.message || x)); } render(); };
+  $("#pPlan").onclick = async e => { e.target.disabled = true; e.target.textContent = "Writing the plan (a few minutes)…";
+    try { await post(`/api/competitions/${slug}/project/bootstrap`); toast("Plan written."); } catch (x) { toast(String(x.message || x)); } render(); };
 }
 
 async function tabOverview(t, d, slug) {
@@ -682,9 +738,9 @@ async function pageSettings(v) {
         ${field("PODIUM_EXPERIMENT_TIMEOUT_S", "Experiment timeout (seconds)", "Hard stop for one experiment in the sandbox.", "number", 'min="60"')}
         <div><button class="btn primary" data-save>Save</button></div></div></div>
       <div class="card"><div class="card-h"><h3>Budgets</h3></div><div class="card-b form" data-group>
-        ${field("PODIUM_WEEKLY_CAP_USD", "Weekly LLM cap ($)", "Fleet pauses and asks you when reached.", "number", 'min="0" step="1"')}
+        ${field("PODIUM_WEEKLY_CAP_USD", "Weekly cap on BILLED AI spend ($)", "Counts only money actually billed (API-key providers). Calls on your Claude subscription are not billed: they are governed by the Claude plan reserve below.", "number", 'min="0" step="1"')}
         ${field("PODIUM_PLAN_RESERVE", "Claude plan reserve (0-1)", "Share of your weekly Claude plan the fleet leaves for you. 0.15 = the fleet pauses its AI work at 85% weekly usage and resumes after the reset.", "number", 'min="0" max="0.9" step="0.05"')}
-        ${field("PODIUM_COMP_CAP_USD", "Default per-competition LLM cap ($)", "Applies to new runs.", "number", 'min="0" step="1"')}
+        ${field("PODIUM_COMP_CAP_USD", "Default per-competition billed AI cap ($)", "Billed spend only (API keys). Applies to new runs.", "number", 'min="0" step="1"')}
         ${field("PODIUM_COMP_CAP_HOURS", "Default per-competition compute cap (h)", "Applies to new runs.", "number", 'min="0" step="1"')}
         <div><button class="btn primary" data-save>Save</button></div></div></div>
       <div class="card"><div class="card-h"><h3>System</h3></div><div class="card-b"><dl class="kv">
@@ -908,10 +964,22 @@ function initChrome() {
   document.addEventListener("mousemove", e => { tip.style.left = Math.min(e.clientX + 12, innerWidth - 350) + "px"; tip.style.top = (e.clientY + 14) + "px"; });
 }
 
-// ------------------------------------------------------------------ Copilot (streaming chat that can act)
-const CP = {messages: store.get("copilot2", []), busy: false, ctrl: null, pending: []};
+// ------------------------------------------------------------------ Copilot (server-side conversations, resumable streaming)
+const CP = {convId: store.get("cpConv", null), title: "", messages: [], busy: false, runId: null, ctrl: null, pending: [], view: "chat", q: ""};
 ICONS.clip = '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>';
-const attUrl = a => `/api/copilot/upload/${a.id.split("/").map(encodeURIComponent).join("/")}`;
+ICONS.history = '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 3"/>';
+ICONS.expand = '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>';
+const SUGGEST = ["Brief me on the whole fleet: where do we stand and what matters most?",
+  "What exactly would move Predicting Airline Satisfaction into the top 10%?",
+  "Search Kaggle for big new competitions we can submit to and assess the best 3.",
+  "What is ongoing right now and what is it waiting for?"];
+const TOOL_LABEL = {fleet: "Read fleet status", competition: "Read competition", leaderboard: "Read leaderboard", strategy: "Read strategy",
+  events: "Read activity", search_kaggle: "Search Kaggle", assess: "Assess competition", recommend: "Recommend & email", start: "Start competition",
+  pause: "Pause / resume", stop: "Stop competition", archive: "Archive competition", set_setting: "Change setting", scout_now: "Run scout",
+  read_file: "Read file", resolve_decision: "Clear decision", navigate: "Open page", kaggle_submissions: "Read Kaggle submissions",
+  add_competition: "Add competition", scan_recent: "Scan recent launches", practice: "Start practice (late)"};
+const pageContext = () => { const r = S.route; return r.page === "competition" ? `competition ${r.slug} (${r.tab || "overview"} tab)` : `${r.page} page`; };
+const attUrl = a => `/api/copilot/upload/${String(a.id).split("/").map(encodeURIComponent).join("/")}`;
 const attChip = (a, removable) => `<span class="cp-att ${a.uploading ? "up" : ""}" title="${esc(a.name)}">${a.kind === "image" && !a.uploading
   ? `<img src="${a.preview || attUrl(a)}" alt="">` : `<span class="cp-att-ic">${a.uploading ? '<span class="spin"></span>' : icon("file")}</span>`}
   <span class="cp-att-name">${esc(a.name)}</span>${removable ? `<button type="button" data-rm="${esc(a.key)}" aria-label="Remove">×</button>` : ""}</span>`;
@@ -924,8 +992,7 @@ async function addFiles(files) {
   for (const f of files) {
     if (f.size > 15 * 1024 * 1024) { toast(`${f.name} is larger than 15 MB.`); continue; }
     const kind = /^image\//.test(f.type) ? "image" : /pdf$/.test(f.type) ? "pdf" : "file";
-    const a = {key: Math.random().toString(36).slice(2), name: f.name || "pasted-image.png", kind, uploading: true,
-               preview: kind === "image" ? URL.createObjectURL(f) : null};
+    const a = {key: Math.random().toString(36).slice(2), name: f.name || "pasted-image.png", kind, uploading: true, preview: kind === "image" ? URL.createObjectURL(f) : null};
     CP.pending.push(a); drawPending();
     try {
       const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
@@ -934,16 +1001,6 @@ async function addFiles(files) {
     drawPending();
   }
 }
-const SUGGEST = ["Brief me on the whole fleet: where do we stand and what matters most?",
-  "What exactly would move Predicting Airline Satisfaction into the top 10%?",
-  "Search Kaggle for big new competitions we can submit to and assess the best 3.",
-  "Open the Store Sales leaderboard and explain our position."];
-const TOOL_LABEL = {fleet: "Read fleet status", competition: "Read competition", leaderboard: "Read leaderboard", strategy: "Read strategy",
-  events: "Read activity", search_kaggle: "Search Kaggle", assess: "Assess competition", recommend: "Recommend & email", start: "Start competition",
-  pause: "Pause / resume", stop: "Stop competition", set_setting: "Change setting", scout_now: "Run scout", read_file: "Read file",
-  resolve_decision: "Clear decision", navigate: "Open page"};
-const pageContext = () => { const r = S.route; return r.page === "competition" ? `competition ${r.slug} (${r.tab || "overview"} tab)` : `${r.page} page`; };
-function openCopilot(prefill) { $("#copilot").hidden = false; drawCopilot(); if (prefill) $("#cpText").value = prefill; $("#cpText").focus(); }
 function stepHtml(st) {
   const args = st.args && Object.keys(st.args).length ? Object.values(st.args).map(v => String(v)).join(", ") : "";
   return `${st.note ? `<div class="cp-note">${md(st.note)}</div>` : ""}<div class="cp-step ${st.done ? (st.ok ? "ok" : "err") : "run"}">
@@ -953,19 +1010,41 @@ function stepHtml(st) {
 }
 function msgHtml(m, i) {
   if (m.role === "user") return `<div class="msg user">${(m.attachments || []).length ? `<div class="cp-msg-atts">${m.attachments.map(a => attChip(a, false)).join("")}</div>` : ""}${esc(m.content)}</div>`;
-  const live = CP.busy && i === CP.messages.length - 1;
-  return `<div class="msg bot" data-i="${i}">${(m.steps || []).length ? `<div class="cp-steps">${m.steps.map(stepHtml).join("")}</div>` : ""}
-    ${m.content || !live ? `<div class="md">${md(m.content || (m.error ? "" : "…"))}${live ? '<span class="cursor"></span>' : ""}</div>`
+  const live = m.status === "streaming";
+  const banner = {error: ["bad", `Failed: ${m.error || "error"}`], stopped: ["warn", "Stopped."], interrupted: ["warn", "Interrupted by a server restart. Ask again to continue."]}[m.status];
+  return `<div class="msg bot">${(m.steps || []).length ? `<div class="cp-steps">${m.steps.map(stepHtml).join("")}</div>` : ""}
+    ${m.content || !live ? `<div class="md">${md(m.content || "")}${live ? '<span class="cursor"></span>' : ""}</div>`
       : `<div><span class="typing"><i></i><i></i><i></i></span> <span class="muted">${(m.steps || []).length ? "working…" : "thinking…"}</span></div>`}
-    ${m.error ? `<div class="banner bad" style="margin:8px 0 0">${icon("alert")}<div>${esc(m.error)}</div></div>` : ""}
+    ${banner ? `<div class="banner ${banner[0]}" style="margin:8px 0 0">${icon("alert")}<div>${esc(banner[1])}</div></div>` : ""}
     ${!live && m.content ? `<div class="cp-tools"><button class="cp-mini" data-copy="${i}" title="Copy answer">Copy</button></div>` : ""}
     ${!live && i === CP.messages.length - 1 && (m.suggestions || []).length ? `<div class="cp-chips">${m.suggestions.map(x => `<button class="cp-chip" type="button">${esc(x)}</button>`).join("")}</div>` : ""}</div>`;
 }
+async function drawHistory() {
+  const b = $("#cpBody");
+  b.innerHTML = `<div class="cp-hist-head"><input id="cpQ" type="text" placeholder="Search conversations…" value="${esc(CP.q)}" aria-label="Search conversations"></div><div id="cpList"><div class="muted">Loading…</div></div>`;
+  const list = async () => {
+    const rows = await api(`/api/copilot/convs?q=${encodeURIComponent(CP.q)}`);
+    $("#cpList").innerHTML = rows.map(r => `<div class="cp-conv ${r.id === CP.convId ? "on" : ""}" data-id="${r.id}" tabindex="0">
+      <div class="cp-conv-main"><b>${esc(r.title)}</b>${r.running ? ' <span class="badge ok"><i class="dot on"></i>answering</span>' : ""}
+        <small class="muted">${esc(r.last || "")}</small><small class="muted">${r.n} messages · ${ago(r.updated_at)}</small></div>
+      <div class="cp-conv-act"><button class="cp-mini" data-ren="${r.id}" title="Rename">Rename</button><button class="cp-mini" data-del="${r.id}" title="Delete">Delete</button></div></div>`).join("")
+      || `<div class="empty">No conversations${CP.q ? " match" : " yet"}.</div>`;
+    $$(".cp-conv", b).forEach(el => el.onclick = e => { if (e.target.closest("[data-ren],[data-del]")) return; loadConv(el.dataset.id); });
+    $$("[data-del]", b).forEach(x => x.onclick = async () => { if (!confirm("Delete this conversation?")) return; await api(`/api/copilot/convs/${x.dataset.del}`, {method: "DELETE"});
+      if (x.dataset.del === CP.convId) { CP.convId = null; CP.messages = []; store.set("cpConv", null); } list(); });
+    $$("[data-ren]", b).forEach(x => x.onclick = async () => { const t = prompt("Rename conversation", x.closest(".cp-conv").querySelector("b").textContent); if (!t) return;
+      await api(`/api/copilot/convs/${x.dataset.ren}`, {method: "PATCH", headers: {"content-type": "application/json"}, body: JSON.stringify({title: t})}); list(); });
+  };
+  let t; $("#cpQ").oninput = e => { CP.q = e.target.value; clearTimeout(t); t = setTimeout(list, 250); };
+  list();
+}
 function drawCopilot() {
-  const b = $("#cpBody"), atBottom = b.scrollHeight - b.scrollTop - b.clientHeight < 80;
+  $("#cpSub").textContent = CP.view === "history" ? "Conversation history" : (CP.title || "New conversation");
   $("#cpSend").textContent = CP.busy ? "Stop" : "Send"; $("#cpSend").classList.toggle("danger", CP.busy); drawPending();
+  if (CP.view === "history") return drawHistory();
+  const b = $("#cpBody"), atBottom = b.scrollHeight - b.scrollTop - b.clientHeight < 80;
   if (!CP.messages.length) {
-    b.innerHTML = `<div class="msg bot"><div class="md"><p><b>Hi, I'm your Podium Copilot.</b> I see every competition, experiment, strategy, leaderboard, alert and dollar spent, and I can act: search and assess Kaggle competitions, recommend joins (with email), start, pause or stop work, clear decisions, change settings and open any page for you.</p></div></div>
+    b.innerHTML = `<div class="msg bot"><div class="md"><p><b>Hi, I'm your Podium Copilot.</b> I see every competition, experiment, strategy, leaderboard, alert and dollar spent, and I can act: search and assess Kaggle competitions, recommend joins, start, pause or stop work, clear decisions, change settings and open any page. Conversations are saved; find them in History.</p></div></div>
       <div class="cp-chips">${SUGGEST.map(x => `<button class="cp-chip" type="button">${esc(x)}</button>`).join("")}</div>`;
   } else b.innerHTML = CP.messages.map(msgHtml).join("");
   $$(".cp-chip", b).forEach(x => x.onclick = () => sendCopilot(x.textContent));
@@ -975,21 +1054,22 @@ function drawCopilot() {
 }
 let drawQueued = false;
 const drawSoon = () => { if (!drawQueued) { drawQueued = true; requestAnimationFrame(() => { drawQueued = false; drawCopilot(); }); } };
-async function sendCopilot(text) {
-  if (CP.busy) { CP.ctrl?.abort(); return; }
-  text = (text || "").trim();
-  if (CP.pending.some(a => a.uploading)) { toast("Wait for the upload to finish."); return; }
-  const atts = CP.pending.map(({id, name, kind, size}) => ({id, name, kind, size}));
-  if (!text && !atts.length) return;
-  if (!text) text = "Here are the attached files.";
-  CP.messages.push({role: "user", content: text, attachments: atts}); CP.pending = []; $("#cpText").style.height = "auto";
-  const bot = {role: "assistant", content: "", steps: [], suggestions: []};
-  CP.messages.push(bot); CP.busy = true; CP.ctrl = new AbortController(); $("#cpText").value = ""; drawCopilot();
+async function loadConv(id) {
+  CP.ctrl?.abort(); CP.busy = false; CP.view = "chat";
+  try {
+    const c = await api(`/api/copilot/convs/${id}`);
+    CP.convId = id; CP.title = c.title; CP.messages = c.messages; store.set("cpConv", id);
+    drawCopilot();
+    const live = c.messages.find(m => m.status === "streaming" && m.live);
+    if (live) { live.navigated = true; follow(live.run_id, live); }  // reconnect after a refresh (no re-navigation)
+  } catch { CP.convId = null; CP.messages = []; store.set("cpConv", null); drawCopilot(); }
+}
+async function follow(runId, bot) {
+  CP.busy = true; CP.runId = runId; CP.ctrl = new AbortController();
+  Object.assign(bot, {content: "", steps: [], suggestions: [], status: "streaming"}); drawCopilot();
   let acted = false;
   try {
-    const r = await fetch("/api/copilot/stream", {method: "POST", headers: {"content-type": "application/json"}, signal: CP.ctrl.signal,
-      body: JSON.stringify({messages: CP.messages.filter(m => m !== bot).map(m => ({role: m.role, content: m.content, attachments: m.attachments || []})), context: pageContext()})});
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+    const r = await fetch(`/api/copilot/runs/${runId}/events?after=0`, {signal: CP.ctrl.signal});
     const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
     for (;;) {
       const {value, done} = await reader.read(); if (done) break;
@@ -1001,26 +1081,52 @@ async function sendCopilot(text) {
         if (ev.type === "delta") bot.content += ev.text;
         else if (ev.type === "step") { bot.steps.push({tool: ev.tool, args: ev.args, action: ev.action, note: ev.note, done: false}); bot.content = ""; acted ||= ev.action; }
         else if (ev.type === "step_done") Object.assign(bot.steps.at(-1) || {}, {done: true, ok: ev.ok, summary: ev.summary});
-        else if (ev.type === "navigate") { go(ev.path); if (innerWidth < 900) $("#copilot").hidden = true; }
+        else if (ev.type === "navigate" && ev.i >= 0 && !bot.navigated) { bot.navigated = true; go(ev.path); if (innerWidth < 900) $("#copilot").hidden = true; }
         else if (ev.type === "done") { bot.content = ev.reply; bot.suggestions = ev.suggestions || []; }
-        else if (ev.type === "error") bot.error = ev.error;
+        else if (ev.type === "error") { bot.status = "error"; bot.error = ev.error; }
+        else if (ev.type === "end") bot.status = ev.status === "gone" ? "interrupted" : (bot.status === "error" ? "error" : ev.status);
         drawSoon();
       }
     }
-  } catch (e) { bot.error = e.name === "AbortError" ? "Stopped." : `Copilot failed: ${e.message}`; }
-  CP.busy = false; CP.ctrl = null;
-  store.set("copilot2", CP.messages.slice(-40)); drawCopilot();
+  } catch (e) { if (e.name !== "AbortError") { bot.status = "error"; bot.error = e.message; } }
+  if (bot.status === "streaming") bot.status = "done";
+  CP.busy = false; CP.ctrl = null; CP.runId = null; drawCopilot();
   if (acted) { await loadFleet(); render(); }
 }
+async function sendCopilot(text) {
+  if (CP.busy) { if (CP.runId) post(`/api/copilot/runs/${CP.runId}/stop`); return; }
+  text = (text || "").trim();
+  if (CP.pending.some(a => a.uploading)) { toast("Wait for the upload to finish."); return; }
+  const atts = CP.pending.map(({id, name, kind, size}) => ({id, name, kind, size}));
+  if (!text && !atts.length) return;
+  if (!text) text = "Here are the attached files.";
+  try {
+    if (!CP.convId) { CP.convId = (await post("/api/copilot/convs", {})).id; store.set("cpConv", CP.convId); CP.title = text.slice(0, 70); }
+    CP.view = "chat"; CP.pending = []; $("#cpText").value = ""; $("#cpText").style.height = "auto";
+    CP.messages.push({role: "user", content: text, attachments: atts});
+    CP.busy = true;  // the button is "Stop" from the very first moment (no double send)
+    const bot = {role: "assistant", content: "", steps: [], suggestions: [], status: "streaming"}; CP.messages.push(bot); drawCopilot();
+    const r = await post(`/api/copilot/convs/${CP.convId}/send`, {content: text, attachments: atts, context: pageContext()});
+    await follow(r.run_id, bot);
+  } catch (e) { toast("Copilot: " + e.message, 6000); CP.busy = false; drawCopilot(); }
+}
+async function openCopilot(prefill) {
+  $("#copilot").hidden = false;
+  const legacy = store.get("copilot2", []);
+  if (legacy.length) { try { CP.convId = (await post("/api/copilot/convs/import", {messages: legacy})).id; store.set("cpConv", CP.convId); } catch {} store.set("copilot2", []); }
+  if (CP.convId && !CP.messages.length) await loadConv(CP.convId); else drawCopilot();
+  if (prefill) $("#cpText").value = prefill; $("#cpText").focus();
+}
 function initCopilot() {
-  ICONS.expand = '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>';
   $("#copilotBtn").innerHTML = `${icon("spark")}<span class="lbl">Copilot</span>`;
   $("#cpClose").innerHTML = icon("x"); $("#cpNew").innerHTML = icon("plus");
-  $("#cpNew").insertAdjacentHTML("beforebegin", `<button class="icon-btn" id="cpWide" title="Expand" aria-label="Expand Copilot">${icon("expand")}</button>`);
+  $("#cpNew").insertAdjacentHTML("beforebegin", `<button class="icon-btn" id="cpHist" title="Conversation history" aria-label="Conversation history">${icon("history")}</button>
+    <button class="icon-btn" id="cpWide" title="Expand" aria-label="Expand Copilot">${icon("expand")}</button>`);
+  $("#cpHist").onclick = () => { CP.view = CP.view === "history" ? "chat" : "history"; drawCopilot(); };
   $("#cpWide").onclick = () => $("#copilot").classList.toggle("wide");
   $("#copilotBtn").onclick = () => $("#copilot").hidden ? openCopilot() : ($("#copilot").hidden = true);
   $("#cpClose").onclick = () => $("#copilot").hidden = true;
-  $("#cpNew").onclick = () => { if (CP.busy) CP.ctrl?.abort(); CP.messages = []; store.set("copilot2", []); drawCopilot(); };
+  $("#cpNew").onclick = () => { CP.ctrl?.abort(); CP.busy = false; CP.convId = null; CP.title = ""; CP.messages = []; CP.view = "chat"; store.set("cpConv", null); drawCopilot(); };
   $("#cpForm").onsubmit = e => { e.preventDefault(); sendCopilot($("#cpText").value); };
   $("#cpText").onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!CP.busy) sendCopilot($("#cpText").value); } };
   $("#cpText").oninput = e => { e.target.style.height = "auto"; e.target.style.height = Math.min(200, e.target.scrollHeight) + "px"; drawPending(); };
@@ -1032,6 +1138,8 @@ function initCopilot() {
   panel.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; $("#cpDrop").hidden = true; } });
   panel.addEventListener("dragover", e => e.preventDefault());
   panel.addEventListener("drop", e => { e.preventDefault(); depth = 0; $("#cpDrop").hidden = true; addFiles([...e.dataTransfer.files]); });
+  if (store.get("cpOpen", false)) openCopilot();  // reopen after a refresh, and resume a live answer
+  new MutationObserver(() => store.set("cpOpen", !$("#copilot").hidden)).observe($("#copilot"), {attributes: true, attributeFilter: ["hidden"]});
 }
 
 // ------------------------------------------------------------------ live wiring

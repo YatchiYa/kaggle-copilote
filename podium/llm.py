@@ -161,7 +161,7 @@ def plan_ok(role="experiment"):
 def probe_plan_usage():
     """Tiny call (Haiku) just to read the current plan utilization."""
     cmd = [config.CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--model",
-           "claude-haiku-4-5", "--system-prompt", "Reply with: ok", "--no-session-persistence", "--setting-sources", ""]
+           "claude-haiku-4-5", "--system-prompt", "Reply with: ok", "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config"]
     p = subprocess.run(cmd, input="ok", capture_output=True, text=True, timeout=120, cwd=config.DATA_DIR)
     for line in p.stdout.splitlines():
         try:
@@ -175,7 +175,7 @@ def probe_plan_usage():
 
 def _claude_code(system, prompt, model, rec, session, continuing, role, tools):
     cmd = [config.CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose", "--system-prompt", system,
-           "--setting-sources", ""]
+           "--setting-sources", "", "--strict-mcp-config"]
     allowed = [t for t in (tools or []) if t in ("WebSearch", "WebFetch")]  # research only; never file/shell tools
     cmd += ["--tools", *allowed, "--allowedTools", *allowed] if allowed else ["--tools", ""]
     if model:
@@ -271,7 +271,7 @@ def stream(system, prompt, max_tokens=8000, role="copilot", agent=None, competit
         if backend == "claude-code":
             rec.update(backend="claude-code", billing="plan" if claude_code_auth().get("authMethod") == "claude.ai" else "api")
             cmd = [config.CLAUDE_BIN, "-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose",
-                   "--system-prompt", system, "--no-session-persistence", "--setting-sources", ""]
+                   "--system-prompt", system, "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config"]
             cmd += ["--tools", "Read", "--allowedTools", f"Read(/{read_dir}/**)"] if read_dir else ["--tools", ""]
             if model:
                 cmd += ["--model", model]

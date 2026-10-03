@@ -44,6 +44,15 @@ Tools:
 - kaggle_submissions(slug): the user's real Kaggle submission history for a competition (status, scores, errors),
   including dedicated projects like gemma-4-developer-agent.
 - read_file(slug, path, lines=150): a file under data/competitions/<slug>/ (e.g. experiments/<id>/main.py, log.txt).
+- practice(slug): work on an ENDED competition through late submissions (scored, never ranked or awarded). Only
+  after the user explicitly wants that; always say clearly that it cannot be won.
+- add_competition(query): add a competition from a Kaggle URL, slug or name (opts it in; reports if it has ended,
+  if it still needs joining, or if its kind makes it a dedicated project).
+- bootstrap_project(slug): (re)build a dedicated project's workspace: official pages, top public notebooks and an
+  expert PLAN.md with a dated timeline (done automatically for every joined project; use this to refresh it).
+- run_public_baseline(slug, ref=None): fork the best-scoring public notebook (or `ref`) as a PRIVATE notebook, run
+  it on Kaggle and submit it when it finishes. Uses Kaggle GPU time and one submission: only when the user asks.
+- scan_recent(days=30): fetch every live competition launched in the last N days and score them.
 - resolve_decision(slug): clear the open decision(s) for a competition (e.g. a join request the user declined).
 - navigate(path): open a page in the user's dashboard right now. Use it when the user asks to open/show/go to
   something. Paths: overview, competitions, competition/<slug>, competition/<slug>/<tab> (tabs: leaderboard,
@@ -61,10 +70,17 @@ Finish every final answer with 2-4 follow-ups the user is likely to want next, p
 ```
 
 Facts about the fleet: it only submits through its review gate (you cannot submit directly); joining a competition
-must be done by the user on kaggle.com (Kaggle requires a human to accept rules); file-submission competitions are
-supported, code-only (notebook) competitions are not yet.
-Agent, paper and code-only competitions are not run by the fleet, but they can be done as a dedicated project that
-the user builds with their developer (Claude Code session). The user deliberately flagged Google DeepMind's
+must be done by the user on kaggle.com (Kaggle requires a human to accept rules). The fleet works on the competition
+kinds enabled in Settings (PODIUM_KINDS, currently shown in the snapshot config). Tabular file-submission competitions
+run in the local Docker sandbox; code-only (notebook), vision, NLP and audio competitions run as private Kaggle
+notebooks (GPU for vision/NLP/audio) and code competitions are submitted from the notebook, but only once their kind
+is enabled; otherwise they are dedicated projects. Agent/simulation competitions (bots playing episodes) are not
+supported by the fleet. Ended competitions can only be worked in practice mode (late submissions: scored, never
+ranked).
+Agent, paper and code-only competitions are not run by the fleet; they are dedicated projects. Podium still drives
+them: each gets projects/<slug>/ with the official pages, top public notebooks and an expert PLAN.md (timeline shown
+on the Ongoing page), a one-click public baseline (fork of the best public notebook, run and submitted on Kaggle),
+and automatic tracking of every Kaggle submission, score and rank. Deeper work is built with the user's developer. The user deliberately flagged Google DeepMind's
 gemma-4-developer-agent ($65k) as the flagship dedicated project: never suggest clearing that decision; explain
 that it is handled outside the fleet. The paper track (gemma-4-developer-agent-paper) is its natural companion
 write-up about Podium itself.
@@ -212,6 +228,33 @@ def _kaggle_submissions(slug):
             for r in rows[:15]]
 
 
+def _bootstrap_project(slug):
+    from . import projects
+    r = projects.bootstrap(slug, force=True)
+    return {**r, "navigate": f"competition/{slug}"}
+
+
+def _run_public_baseline(slug, ref=None):
+    from . import projects
+    return projects.baseline(slug, ref)
+
+
+def _practice(slug):
+    from .api import practice
+    return practice(slug)
+
+
+def _add_competition(query):
+    from .api import AddIn, add_competition
+    return add_competition(AddIn(query=query))
+
+
+def _scan_recent(days=30):
+    from .api import scan
+    r = scan(int(days))
+    return {"found": r["found"], "new": r["new"], "competitions": r["competitions"][:15]}
+
+
 def _scout_now():
     db.set_setting("scout_at", 0)
     return {"ok": True, "note": "Scout runs on the next fleet pass (within a minute)."}
@@ -247,13 +290,16 @@ def _navigate(path):
 TOOLS = {"fleet": _fleet, "competition": _competition, "leaderboard": _leaderboard, "strategy": _strategy,
          "events": _events, "search_kaggle": _search_kaggle, "assess": _assess, "recommend": _recommend,
          "start": _start, "pause": _pause, "stop": _stop, "archive": _archive, "set_setting": _set_setting, "scout_now": _scout_now,
-         "read_file": _read_file, "resolve_decision": _resolve_decision, "kaggle_submissions": _kaggle_submissions, "navigate": _navigate}
-ACTIONS = {"recommend", "start", "pause", "stop", "archive", "set_setting", "scout_now", "resolve_decision", "navigate"}
+         "read_file": _read_file, "resolve_decision": _resolve_decision, "add_competition": _add_competition, "practice": _practice,
+         "scan_recent": _scan_recent, "kaggle_submissions": _kaggle_submissions, "navigate": _navigate,
+         "bootstrap_project": _bootstrap_project, "run_public_baseline": _run_public_baseline}
+ACTIONS = {"bootstrap_project", "run_public_baseline", "recommend", "start", "pause", "stop", "archive", "add_competition", "practice", "set_setting", "scout_now", "resolve_decision", "navigate"}
 
 
 def snapshot(context=None):
     f = _fleet()
-    lines = [f"Now: {db.now()} UTC. Model: {config.MODEL}. Fleet {'PAUSED' if f['fleet_paused'] else 'running'}.",
+    lines = [f"Now: {db.now()} UTC. Model: {config.MODEL}. Fleet {'PAUSED' if f['fleet_paused'] else 'running'}. "
+             f"Enabled kinds: {','.join(sorted(config.KINDS))}. Executor: {config.EXECUTOR}.",
              f"KPIs: {json.dumps(f['kpis'])}",
              "Competitions in play / recommended:"]
     for c in f["competitions"]:
@@ -435,3 +481,80 @@ if __name__ == "__main__":  # offline check of the tool-call parser and executor
     assert visible("x ```suggest\n[\"a\"]\n```") == "x "
     assert run_tool("navigate", {"path": "#/competition/titanic/leaderboard"})["path"] == "competition/titanic/leaderboard"
     print("ok")
+
+
+# ---------------------------------------------------------------- persistent conversations + resumable runs
+import threading as _threading
+import uuid as _uuid
+
+RUNS = {}  # run_id -> {"events": [...], "done": bool, "stop": Event, "conv_id", "msg_id"}
+
+
+def conv_messages(conv_id):
+    rows = db.q("SELECT * FROM copilot_msgs WHERE conv_id=? ORDER BY id", conv_id)
+    for r in rows:
+        for k in ("attachments", "steps", "suggestions"):
+            r[k] = json.loads(r[k] or "[]")
+        if r["status"] == "streaming" and r["run_id"] not in RUNS:  # server restarted mid-answer
+            r["status"] = "interrupted"
+            db.x("UPDATE copilot_msgs SET status='interrupted' WHERE id=?", r["id"])
+    return rows
+
+
+def start_run(conv_id, content, attachments, context):
+    """Store the user message + an assistant placeholder, then answer in a background thread (survives refresh)."""
+    now = db.now()
+    db.x("INSERT INTO copilot_msgs (conv_id, role, content, attachments, created_at) VALUES (?,?,?,?,?)",
+         conv_id, "user", content, json.dumps(attachments or []), now)
+    history = [{"role": m["role"], "content": m["content"], "attachments": m["attachments"]}
+               for m in conv_messages(conv_id) if m["status"] not in ("interrupted", "streaming")]
+    run_id = _uuid.uuid4().hex[:12]
+    run = {"events": [], "done": False, "stop": _threading.Event(), "conv_id": conv_id, "msg_id": None}
+    RUNS[run_id] = run  # registered BEFORE the placeholder exists, so nobody marks it interrupted
+    with db.conn() as c:
+        cur = c.execute("INSERT INTO copilot_msgs (conv_id, role, content, status, run_id, created_at) VALUES (?,?,?,?,?,?)",
+                        (conv_id, "assistant", "", "streaming", run_id, now))
+        msg_id = cur.lastrowid
+    first = db.one("SELECT COUNT(*) n FROM copilot_msgs WHERE conv_id=? AND role='user'", conv_id)["n"] == 1
+    db.x("UPDATE copilot_convs SET updated_at=?" + (", title=?" if first else "") + " WHERE id=?",
+         *([now, content[:70] or "Attachments"] if first else [now]), conv_id)
+    run["msg_id"] = msg_id
+    _threading.Thread(target=_run, args=(run_id, history, context), daemon=True, name=f"copilot-{run_id}").start()
+    return run_id, msg_id
+
+
+def _run(run_id, history, context):
+    run = RUNS[run_id]
+    content, steps, last_save = "", [], 0.0
+    status, err, suggestions = "done", None, []
+    try:
+        gen = chat_stream(history, context)
+        for ev in gen:
+            run["events"].append(ev)
+            if ev["type"] == "delta":
+                content += ev["text"]
+            elif ev["type"] == "step":
+                steps.append({**ev, "done": False})
+                content = ""
+            elif ev["type"] == "step_done" and steps:
+                steps[-1].update(done=True, ok=ev["ok"], summary=ev["summary"])
+            elif ev["type"] == "done":
+                content, suggestions = ev["reply"], ev["suggestions"]
+            if run["stop"].is_set():
+                gen.close()  # kills the Claude Code process
+                status = "stopped"
+                break
+            if time.time() - last_save > 2:  # keep the DB copy fresh for other tabs/devices
+                db.x("UPDATE copilot_msgs SET content=?, steps=? WHERE id=?", content, json.dumps(steps), run["msg_id"])
+                last_save = time.time()
+    except Exception as e:
+        status, err = "error", str(e)[:400]
+        run["events"].append({"type": "error", "error": err})
+    db.x("UPDATE copilot_msgs SET content=?, steps=?, suggestions=?, status=?, error=? WHERE id=?",
+         content, json.dumps(steps), json.dumps(suggestions), status, err, run["msg_id"])
+    run["events"].append({"type": "end", "status": status})
+    run["done"] = True
+    _threading.Timer(1800, lambda: RUNS.pop(run_id, None)).start()  # keep the replay buffer 30 min
+
+
+import time  # noqa: E402  (used by _run)

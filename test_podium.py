@@ -51,6 +51,13 @@ with tempfile.TemporaryDirectory() as tmp:
         (out / "submission.csv").write_text("id,target\n1,0.5\n")
         assert "bad_submission_format" in agents.critic(out, task, cv)
 
+# A crashing experiment reports its exit code to the Solver (and a stale container name never blocks a run).
+with tempfile.TemporaryDirectory() as tmp:
+    t = make_task(tmp, "auc")
+    for _ in range(2):  # same container name twice
+        cv, std, log, secs = engines.execute("import sys; print('boom'); sys.exit(3)", t["dir"], Path(tmp) / "x", name="podium-test-exitcode")
+    assert cv is None and "[podium] container exit code 3" in log, log[-300:]
+
 # Submitter: submits the best CV, then spends quota again only when the gain beats fold noise.
 class FakeKaggle:
     sent = []
@@ -137,6 +144,17 @@ assert engines.select_parent(ok_nodes, hist_b, t)[0]["id"] == "c"  # 'b' over-ex
 assert engines.select_parent(ok_nodes, hist + [{"id": "e", "cv_mean": None, "summary": "", "parent_id": "b"}], t)[1] == "draft"
 assert engines.select_parent(ok_nodes, hist, {"higher_is_better": True, "days_left": 2})[1] == "final"
 
+# Dollar caps count only BILLED spend: plan-covered (Claude subscription) calls never pause the fleet.
+db.set_setting("fleet_paused", False)
+db.x("INSERT INTO llm_calls (ts, agent, competition, purpose, backend, model, billing, cost_usd, ok) VALUES (?,?,?,?,?,?,?,?,1)",
+     db.now(), "Solver", "c", "experiment", "claude-code", "claude-opus-5-5", "plan", 999.0)
+run_c = {"budget_usd": 20, "budget_gpu_h": 10}
+assert not agents.over_budget(db.one("SELECT * FROM competitions WHERE slug='c'"), run_c) and not db.setting("fleet_paused")
+db.x("INSERT INTO llm_calls (ts, agent, competition, purpose, backend, model, billing, cost_usd, ok) VALUES (?,?,?,?,?,?,?,?,1)",
+     db.now(), "Solver", "c", "experiment", "litellm:anthropic", "anthropic/x", "api", 999.0)
+assert agents.over_budget(db.one("SELECT * FROM competitions WHERE slug='c'"), run_c)  # billed money does trip it
+db.set_setting("fleet_paused", False)
+
 # Rank chance: a small tabular playground beats a leaked getting-started board.
 class C: pass
 def comp(cat):
@@ -145,4 +163,11 @@ good, _ = agents.chance(comp("Playground"), "tabular", 25, 50e6, [0.96] * 800, 1
 bad, why = agents.chance(comp("Getting Started"), "tabular", 400, 1e6, [1.0] * 15000, 1, "Categorization Accuracy")
 assert good >= 80 and bad < 45, (good, bad, why)
 assert agents.chance(comp("Playground"), "cv", 25, 50e6, [], 1, "AUC")[0] == 0
+
+# Projects: a plan that names a competition in backticks owns it; the timeline table is parsed into milestones.
+from podium import projects, api
+assert projects.project_dir("gemma-4-developer-agent").name == "gemma4-swe-paper"
+assert projects.project_dir("brand-new-comp").name == "brand-new-comp"
+ms = api._milestones("| Dates | Milestone |\n|---|---|\n| Oct 4–8 | baseline ✅ |\n| Nov 2 | final |")
+assert [m["state"] for m in ms][0] == "done" and ms[1]["end"] == "2026-11-02", ms
 print("ok")

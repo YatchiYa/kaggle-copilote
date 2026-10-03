@@ -108,7 +108,9 @@ REFLECT_EVERY = env("PODIUM_REFLECT_EVERY", 4)  # strategist re-plans after this
 AUTO_SUBMIT = env("PODIUM_AUTO_SUBMIT", 1) == 1
 DAILY_SUBMISSIONS = env("PODIUM_DAILY_SUBMISSIONS", 0)  # 0 = each competition's own Kaggle daily limit
 COMP_CAP_USD = env("PODIUM_COMP_CAP_USD", 20.0)
-COMP_CAP_HOURS = env("PODIUM_COMP_CAP_HOURS", 10.0)
+COMP_CAP_HOURS = env("PODIUM_COMP_CAP_HOURS", 200.0)  # local compute is free; this is a runaway guard
+STAGNATION = env("PODIUM_STAGNATION", 6)  # experiments without a new best -> emergency reflection + research
+PLATEAU = env("PODIUM_PLATEAU", 12)  # experiments without a new best (after MAX_EXPERIMENTS) before a run plateaus
 WEEKLY_CAP_USD = env("PODIUM_WEEKLY_CAP_USD", 50.0)
 
 FLEET = env("PODIUM_FLEET", 1) == 1  # 0 = dashboard only. Run ONE active fleet per Kaggle account.

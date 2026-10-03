@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS human_tasks (
   id TEXT PRIMARY KEY, competition_slug TEXT, kind TEXT, url TEXT, detail TEXT,
   status TEXT DEFAULT 'open', created_at TEXT);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS copilot_convs (id TEXT PRIMARY KEY, title TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS copilot_msgs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, conv_id TEXT, role TEXT, content TEXT, attachments TEXT DEFAULT '[]',
+  steps TEXT DEFAULT '[]', suggestions TEXT DEFAULT '[]', status TEXT DEFAULT 'done', run_id TEXT, error TEXT,
+  created_at TEXT);
 CREATE TABLE IF NOT EXISTS llm_calls (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, agent TEXT, competition TEXT, purpose TEXT, backend TEXT, model TEXT,
   billing TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, cache_tokens INTEGER DEFAULT 0,
@@ -69,7 +74,8 @@ MIGRATIONS = ["ALTER TABLE competitions ADD COLUMN why TEXT", "ALTER TABLE compe
               "ALTER TABLE competitions ADD COLUMN scored_at TEXT", "ALTER TABLE competitions ADD COLUMN rank_at TEXT",
               "ALTER TABLE competitions ADD COLUMN category TEXT",
               "ALTER TABLE competitions ADD COLUMN opt_in INTEGER DEFAULT 0", "ALTER TABLE experiments ADD COLUMN review TEXT",
-              "ALTER TABLE experiments ADD COLUMN cv_scheme TEXT"]
+              "ALTER TABLE experiments ADD COLUMN cv_scheme TEXT",
+              "ALTER TABLE competitions ADD COLUMN practice INTEGER DEFAULT 0"]
 
 
 def init():
@@ -101,7 +107,8 @@ def x(sql, *args):
 
 # Event types that reach you by email / webhook. Noisy ones are throttled per competition.
 NOTIFY_TYPES = {"plan.hold", "submission.scored", "rank.updated", "human_task.opened", "agent.error", "cv_lb.diverged",
-                "competition.unblocked", "competition.recommended", "strategy.updated", "competition.joined"}
+                "competition.unblocked", "competition.recommended", "strategy.updated", "competition.joined",
+                "project.bootstrapped"}
 THROTTLED = {"agent.error": 3600, "cv_lb.diverged": 6 * 3600, "strategy.updated": 3600}
 _last_sent = {}
 
@@ -141,6 +148,14 @@ def describe(type, payload, competition):
                               f"(week {int(100 * (p.get('seven_day') or 0))}% used, 5-hour {int(100 * (p.get('five_hour') or 0))}%). "
                               "It resumes automatically when the window resets."),
         "plan.resumed": lambda: "Claude plan: allowance available again, the fleet resumed its AI work.",
+        "project.bootstrapped": lambda: f"{c}: project ready: official pages ({p.get('pages')}), "
+                                        f"{p.get('notebooks')} top public notebooks and an expert PLAN.md with a timeline.",
+        "project.baseline": lambda: (f"{c}: baseline launch failed: {p['error']}" if p.get("error") else
+                                     f"{c}: forked public notebook {p.get('from')} privately as {p.get('run')}; it runs on Kaggle "
+                                     "and is submitted when it finishes."),
+        "competition.practice": lambda: f"{c}: practice mode on (late submissions: scored, not ranked).",
+        "strategy.stagnation": lambda: f"{c}: {p.get('since_best')} experiments without a new best: emergency reflection with research.",
+        "competition.added": lambda: f"{c}: added by you" + (" (already ended)" if p.get("ended") else "") + ".",
         "competition.joined": lambda: f"{c}: you joined {p.get('title', '')} on Kaggle. The fleet is taking it on.",
         "competition.project": lambda: f"{c}: joined; handled as a dedicated project (outside the fleet).",
         "competition.stopped": lambda: f"{c}: stopped by you. It will not restart until you resume it.",

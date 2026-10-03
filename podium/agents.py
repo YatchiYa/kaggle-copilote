@@ -224,7 +224,8 @@ def scout():
         if c.submissions_disabled:
             continue
         new += upsert_competition(c, now)
-    db.x("UPDATE competitions SET state='finished' WHERE deadline < ? AND state != 'finished'", now.isoformat())
+    db.x("UPDATE competitions SET state='finished' WHERE deadline < ? AND state != 'finished' AND COALESCE(practice,0)=0",
+         now.isoformat())
     db.emit("Scout", "scout.done", {"listed": len(seen), "new": new})
 
 
@@ -311,6 +312,17 @@ def spend(slug=None, days=None):
     return db.one(sql, *args)
 
 
+def billed_spend(slug=None, days=None):
+    """Money actually billed per call (API-key providers). Calls covered by a Claude subscription are excluded:
+    those are governed by the real plan usage and the plan reserve, not by dollar caps."""
+    sql, args = "SELECT COALESCE(SUM(cost_usd),0) usd FROM llm_calls WHERE billing='api'", []
+    if slug:
+        sql += " AND competition=?"; args.append(slug)
+    if days:
+        sql += " AND ts >= ?"; args.append((datetime.now(timezone.utc) - timedelta(days=days)).isoformat())
+    return db.one(sql, *args)["usd"]
+
+
 def hours(slug):
     return db.one("SELECT COALESCE(SUM(e.seconds),0)/3600.0 AS h FROM experiments e JOIN runs r ON e.run_id=r.id "
                   "WHERE r.competition_slug=?", slug)["h"]
@@ -318,11 +330,11 @@ def hours(slug):
 
 def over_budget(c, run):
     weekly = db.setting("weekly_cap_usd", config.WEEKLY_CAP_USD)
-    if spend(days=7)["usd"] >= weekly:
+    if billed_spend(days=7) >= weekly:
         db.set_setting("fleet_paused", True)
         db.open_task("*", "approve", "", f"Weekly cap ${weekly} reached. Fleet paused; raise the cap to resume.")
         return True
-    if spend(c["slug"])["usd"] >= run["budget_usd"] or hours(c["slug"]) >= run["budget_gpu_h"]:
+    if billed_spend(c["slug"]) >= run["budget_usd"] or hours(c["slug"]) >= run["budget_gpu_h"]:
         db.x("UPDATE competitions SET paused=1, note='cap reached' WHERE slug=?", c["slug"])
         db.open_task(c["slug"], "approve", "", "Competition budget cap reached. Raise its cap to resume.")
         return True
@@ -343,11 +355,14 @@ def task_for(c, with_strategy=True):
     lines.append("\n## Goal\nMaximise the final (private) leaderboard rank. Trust robust CV over the public board.")
     fb = []  # the live situation: also sent alone on every conversation turn
     days = (datetime.fromisoformat(c["deadline"]) - datetime.now(timezone.utc)).days
+    if c["practice"]:
+        fb.append("PRACTICE (late submissions after the deadline): scored but not ranked; optimise for a strong score.")
     fb.append(f"Deadline in {days} days. Submissions today: {max(today_count(c['slug']), 0)}/{quota_for(c)} (Kaggle limit).")
     if c["lb_top"] is not None:
         fb.append(f"Leaderboard: {c['lb_teams']} teams, top public score {c['lb_top']}, top-10% cutoff {c['lb_p10']}.")
     if c["lb_rank"]:
         fb.append(f"Our current public rank: {c['lb_rank']}/{c['lb_teams']} (top {100 * c['lb_rank'] / c['lb_teams']:.1f}%).")
+    fb += score_targets(c)
     for s in db.q("SELECT s.experiment_id, e.cv_mean, e.summary, s.lb_public FROM submissions s JOIN experiments e "
                   "ON s.experiment_id=e.id WHERE s.competition_slug=? AND s.lb_public IS NOT NULL", c["slug"]):
         fb.append(f"Submitted {s['experiment_id']} '{s['summary'][:80]}': CV {s['cv_mean']:.5f} -> public LB {s['lb_public']:.5f}")
@@ -375,7 +390,7 @@ def task_for(c, with_strategy=True):
     changed = bool(plan_md) and db.setting(f"conv:{c['slug']}:solver:plan_seen") != v
     return {"slug": c["slug"], "metric": c["metric"], "higher_is_better": bool(c["higher_is_better"]),
             "dir": d, "description": "\n".join(lines), "diverged": g["diverged"], "feedback": "\n".join(fb),
-            "days_left": days,
+            "days_left": None if c["practice"] else days,
             "plan": plan_md, "plan_version": v, "plan_changed": changed, "memory": fleet_memory()}
 
 
@@ -408,6 +423,79 @@ def remember_lessons(slug, plan_md):
     return len(added)
 
 
+def score_targets(c):
+    """What public score it takes to reach the next tiers, from the real leaderboard."""
+    try:
+        lb = leaderboard(c["slug"], hib=bool(c["higher_is_better"]))
+    except Exception:
+        lb = []
+    if len(lb) < 20:
+        return []
+    best = db.one(f"SELECT {'MAX' if c['higher_is_better'] else 'MIN'}(lb_public) v FROM submissions WHERE competition_slug=?",
+                  c["slug"])["v"]
+    out = []
+    for label, frac in (("top 25%", 0.25), ("top 10%", 0.10), ("top 5%", 0.05), ("top 1%", 0.01)):
+        cut = lb[max(0, int(len(lb) * frac) - 1)]
+        gap = f" (gap {abs(best - cut):.5f})" if best is not None else ""
+        out.append(f"{label}: {'>=' if c['higher_is_better'] else '<='} {cut}{gap}")
+    return ["Score targets on the public LB: " + "; ".join(out) + f"; leader {lb[0]}."]
+
+
+def since_best(history, hib):
+    """Experiments since the last new best CV (stagnation counter)."""
+    best, n = None, 0
+    for h in history:
+        if h["cv_mean"] is None or h["critic_flags"] != "[]":
+            n += 1
+            continue
+        if best is None or (h["cv_mean"] > best if hib else h["cv_mean"] < best):
+            best, n = h["cv_mean"], 0
+        else:
+            n += 1
+    return n
+
+
+def public_notebooks(c, limit=5, pull=2):
+    """Kaggle immersion: the competition's top public notebooks (titles, votes) and the code of the best ones,
+    cached daily. Public, shareable ideas only; the strategist distils them, it never copies blindly."""
+    sd = strategy_dir(c["slug"])
+    cache = sd / "public_notebooks.md"
+    if cache.exists() and time.time() - cache.stat().st_mtime < 86400:
+        return cache.read_text()
+    ks = []
+    for sort in ("scoreDescending" if c["higher_is_better"] else "scoreAscending", "voteCount"):
+        try:
+            got = kaggle().kernels_list(competition=c["slug"], sort_by=sort, page_size=20) or []
+        except Exception:
+            continue
+        got = [k for k in got if not re.match(r"(exercise|tutorial)\b", (k.title or "").lower())]
+        ks += [k for k in got if k.ref not in {x.ref for x in ks}]
+        if len(ks) >= limit:
+            break
+    ks = ks[:limit]
+    if not ks:
+        return ""
+    parts = [f"- {k.title} ({getattr(k, 'total_votes', '?')} votes) {k.ref}" for k in ks]
+    import tempfile
+    for k in ks[:pull]:
+        try:
+            d = Path(tempfile.mkdtemp())
+            kaggle().kernels_pull(k.ref, str(d))
+            f = next(iter(sorted(d.glob("*"))), None)
+            if f and f.suffix == ".ipynb":
+                nb = json.loads(f.read_text())
+                code = "\n\n".join("".join(x["source"]) for x in nb.get("cells", []) if x.get("cell_type") == "code")
+            else:
+                code = f.read_text() if f else ""
+            parts.append(f"\n### Code of '{k.title}' ({getattr(k, 'total_votes', '?')} votes), truncated\n```python\n{code[:7000]}\n```")
+        except Exception:
+            continue
+    md = "\n".join(parts)
+    sd.mkdir(parents=True, exist_ok=True)
+    cache.write_text(md)
+    return md
+
+
 def strategy_dir(slug):
     return comp_dir(slug) / "strategy"
 
@@ -424,7 +512,11 @@ def evidence(c, history):
     days = (datetime.fromisoformat(c["deadline"]) - datetime.now(timezone.utc)).days
     rank = (f"Rank {c['lb_rank']}/{c['lb_teams']}, top public {c['lb_top']}, top-10% cutoff {c['lb_p10']}"
             if c["lb_rank"] else "Not ranked yet.") + f" Deadline in {days} days; daily submission limit {quota_for(c)}."
-    return "\n".join(rows) + "\n\n" + rank
+    stuck = since_best(history, bool(c["higher_is_better"]))
+    extra = [f"Experiments since the last new best CV: {stuck}"
+             + (" -> STAGNATION: change approach (research what top solutions do, new model families, ensembling)."
+                if stuck >= config.STAGNATION else "")] + score_targets(c)
+    return "\n".join(rows) + "\n\n" + rank + "\n" + "\n".join(extra)
 
 
 EXTERNAL_OK = ("Playground", "Getting Started")  # categories whose rules allow public external data
@@ -473,12 +565,20 @@ def ensure_strategy(c, run, history):
     meta = db.setting(key, {})
     scored = db.one("SELECT COUNT(*) n FROM submissions WHERE competition_slug=? AND lb_public IS NOT NULL", c["slug"])["n"]
     plan = sd / "plan.md"
+    stuck = since_best(history, bool(c["higher_is_better"]))
     due = (not plan.exists() or len(history) - meta.get("experiments", 0) >= config.REFLECT_EVERY
-           or (scored > meta.get("scored", 0) and len(history) > meta.get("experiments", 0)))
+           or (scored > meta.get("scored", 0) and len(history) > meta.get("experiments", 0))
+           or (stuck >= config.STAGNATION and len(history) - meta.get("experiments", 0) >= 2))
+    if due and stuck >= config.STAGNATION:
+        db.emit("Strategist", "strategy.stagnation", {"since_best": stuck}, run_id=run["id"], competition=c["slug"])
     if not due:
         return
     version = meta.get("version", 0) + 1
     cands = external_candidates(c)
+    pub = public_notebooks(c)
+    if pub:
+        task = {**task, "description": task["description"] + "\n\n# Top public notebooks of this competition (community "
+                "knowledge: distil ideas, verify with our own CV, never copy blindly)\n" + pub}
     md, tokens, cost = engines.strategy(task, prof.read_text(), plan.read_text() if plan.exists() else None,
                                         evidence(c, history) if plan.exists() else None,
                                         book=engines.playbook(c["category"], c["kind"], prof.read_text()),
@@ -610,7 +710,7 @@ def solve_one(c):
     if run["engine"] != "baseline" and plan_hold(c["slug"]):
         return
     history = db.q("SELECT * FROM experiments WHERE run_id=? ORDER BY created_at", run["id"])
-    if len(history) >= config.MAX_EXPERIMENTS:
+    if len(history) >= config.MAX_EXPERIMENTS and since_best(history, bool(c["higher_is_better"])) >= config.PLATEAU:
         return finish_run(c, run, {"experiments": len(history)})
     if run["engine"] != "baseline":
         ensure_strategy(c, run, history)
@@ -655,15 +755,23 @@ def find_orphan(slug):
 
 def run_experiment(c, run, task, prop, exp_id):
     exp_dir = comp_dir(c["slug"]) / "experiments" / exp_id
-    cv, std, log, secs = engines.run_anywhere(dict(c), prop["code"], task["dir"], exp_dir, prev_dir=exp_dir.parent,
-                                              name=container_prefix(c["slug"]) + exp_id, plan_md=task.get("plan", ""))
+    done = exp_dir / "result.json"
+    if done.exists() and (exp_dir / "submission.csv").exists():  # it already finished (e.g. before a restart): record it
+        r = json.loads(done.read_text())
+        log = (exp_dir / "log.txt").read_text() if (exp_dir / "log.txt").exists() else ""
+        cv, std, secs = float(r["cv_mean"]), float(r.get("cv_std") or 0.0), 0.0
+    else:
+        cv, std, log, secs = engines.run_anywhere(dict(c), prop["code"], task["dir"], exp_dir, prev_dir=exp_dir.parent,
+                                                  name=container_prefix(c["slug"]) + exp_id, plan_md=task.get("plan", ""))
     if cv is None and not still_wanted(c["slug"]):  # killed by pause/stop: not the Solver's mistake, don't record it
         db.emit("Solver", "experiment.cancelled", {"experiment_id": exp_id}, run_id=run["id"], competition=c["slug"])
         return
     flags = critic(exp_dir, task, cv)
     res = exp_dir / "result.json"
     scheme = str(json.loads(res.read_text()).get("cv_scheme") or "default")[:40] if res.exists() else None
-    db.x("INSERT INTO experiments (id, run_id, parent_id, summary, cv_mean, cv_std, code_uri, sub_uri, "
+    if db.one("SELECT 1 FROM experiments WHERE id=?", exp_id):  # already recorded (e.g. by a process shutting down)
+        return
+    db.x("INSERT OR IGNORE INTO experiments (id, run_id, parent_id, summary, cv_mean, cv_std, code_uri, sub_uri, "
          "critic_flags, seconds, created_at, cv_scheme) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", exp_id, run["id"],
          prop["parent_id"], prop["summary"], cv, std, str(exp_dir / "main.py"), str(exp_dir / "submission.csv"),
          json.dumps(flags), secs, db.now(), scheme)
@@ -787,7 +895,10 @@ def track_projects():
 
 
 def submitter():
+    from . import projects
     track_projects()
+    projects.auto_bootstrap()
+    projects.track()
     for c in db.q("SELECT * FROM competitions WHERE state IN ('active','done')"):
         slug, sign = c["slug"], 1 if c["higher_is_better"] else -1
         refresh_scores(slug)

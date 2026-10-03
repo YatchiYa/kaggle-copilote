@@ -35,6 +35,7 @@ Podium is a **serious, working autonomous Kaggle system**. It finds competitions
 - [x] Per-role models in `.env`; multi-provider; spend per call, model, purpose and competition
 - [x] Email alerts; professional dashboard; streaming Copilot that can act, navigate and read attachments
 - [x] Stop, Archive and Resume that stick; dedicated-project state for agent and paper competitions
+- [x] Projects are first-class (`podium/projects.py`): every joined project gets official pages, top public notebooks and an expert PLAN.md with a dated timeline (on Ongoing), a one-click public baseline (private fork run and submitted on Kaggle), and automatic submission/score/rank tracking
 - [x] Gemma 4 main track: harness studied, **Podium-SWE v1 submitted**; Paper Track plan and skeleton written
 
 ## Gaps to world level (to-do)
