@@ -62,6 +62,13 @@ def fleet():
         if c["state"] == "project":
             p = db.setting(f"proj:{c['slug']}", {})
             c["project"] = {k: p.get(k) for k in ("count", "status", "best", "latest")}
+            from . import projects as _pj
+            pdir = _pj.project_dir(c["slug"])
+            runs = [json.loads(f.read_text()) for f in sorted((pdir / "runs").glob("*/run.json"))] if (pdir / "runs").exists() else []
+            live = [r for r in runs if r.get("status") in ("queued", "running") or (not r.get("checked") and not r.get("failed"))]
+            c["project"].update(plan=(pdir / "PLAN.md").exists(), runs=len(runs), live=len(live),
+                                failed=sum(1 for r in runs if r.get("failed")))
+            c["running"] = c["running"] or bool(live)
             c["lb_public"] = c["lb_public"] if c["lb_public"] is not None else p.get("best")
     day = db.now()[:10]
     since = db.one("SELECT datetime('now','-1 day') d")["d"].replace(" ", "T")
@@ -506,7 +513,7 @@ EDITABLE = {
     "PODIUM_CONVERSATION_MAX_TURNS": ("CONVERSATION_MAX_TURNS", int),
     "PODIUM_MAX_ACTIVE": ("MAX_ACTIVE", int), "PODIUM_MIN_CHANCE": ("MIN_CHANCE", int),
     "PODIUM_MAX_EXPERIMENTS": ("MAX_EXPERIMENTS", int), "PODIUM_REFLECT_EVERY": ("REFLECT_EVERY", int),
-    "PODIUM_AUTO_SUBMIT": ("AUTO_SUBMIT", bool), "PODIUM_REVIEW": ("REVIEW", bool),
+    "PODIUM_AUTO_SUBMIT": ("AUTO_SUBMIT", bool), "PODIUM_PROJECT_AUTOPILOT": ("PROJECT_AUTOPILOT", bool), "PODIUM_REVIEW": ("REVIEW", bool),
     "PODIUM_DAILY_SUBMISSIONS": ("DAILY_SUBMISSIONS", int), "PODIUM_SCOUT_SECONDS": ("SCOUT_SECONDS", int),
     "PODIUM_LOOP_SECONDS": ("LOOP_SECONDS", int), "PODIUM_COMP_CAP_USD": ("COMP_CAP_USD", float),
     "PODIUM_COMP_CAP_HOURS": ("COMP_CAP_HOURS", float), "PODIUM_WEEKLY_CAP_USD": ("WEEKLY_CAP_USD", float),

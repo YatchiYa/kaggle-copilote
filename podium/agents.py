@@ -106,6 +106,19 @@ def leaderboard(slug, max_age_s=1800, hib=True):
         return []
 
 
+def own_rank(slug):
+    """Our team's exact position on Kaggle's public leaderboard (ties are ordered by submission time), or None."""
+    f = comp_dir(slug) / "leaderboard.csv"
+    try:
+        user = kaggle().get_config_value("username")
+        df = pd.read_csv(f, usecols=["Rank", "TeamMemberUserNames"])
+        mine = df[df["TeamMemberUserNames"].fillna("").astype(str).str.split(",").apply(
+            lambda us: user in [u.strip() for u in us])]
+        return int(mine["Rank"].iloc[0]) if len(mine) else None
+    except Exception:
+        return None
+
+
 KNOWN_METRICS = ("auc", "rmse", "rmsle", "mae", "accuracy", "log", "f1", "r2", "mse", "mape")
 BOUNDED_METRICS = ("auc", "accuracy", "f1", "map", "dice", "iou")
 
@@ -891,7 +904,7 @@ def track_projects():
         rank = None
         if best is not None:
             lb = leaderboard(slug, hib=hib)
-            rank = 1 + sum(1 for x in lb if (x > best if hib else x < best)) if lb else None
+            rank = (own_rank(slug) or max(1, sum(1 for x in lb if (x >= best if hib else x <= best)))) if lb else None
             db.x("UPDATE competitions SET lb_rank=?, lb_teams=?, rank_at=? WHERE slug=?", rank, len(lb) or None,
                  db.now(), slug)
         db.x("UPDATE competitions SET note=? WHERE slug=?",
@@ -902,6 +915,7 @@ def submitter():
     from . import projects
     track_projects()
     projects.auto_bootstrap()
+    projects.auto_baseline()
     projects.track()
     for c in db.q("SELECT * FROM competitions WHERE state IN ('active','done')"):
         slug, sign = c["slug"], 1 if c["higher_is_better"] else -1
@@ -996,7 +1010,7 @@ def update_rank(c):
     lb = leaderboard(slug, hib=sign > 0)
     if not lb:
         return
-    rank = 1 + sum(1 for x in lb if sign * x > sign * best)
+    rank = own_rank(slug) or max(1, sum(1 for x in lb if sign * x >= sign * best))  # our row is in lb: ties count against us
     db.x("UPDATE competitions SET lb_rank=?, lb_teams=?, lb_top=?, lb_p10=?, rank_at=? WHERE slug=?", rank, len(lb),
          lb[0], lb[max(0, len(lb) // 10 - 1)], db.now(), slug)
     if rank != c["lb_rank"]:

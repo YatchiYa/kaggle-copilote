@@ -147,6 +147,22 @@ except _api.HTTPException:
 _api.stop("m"); assert db.setting("idea:m") == []
 config.MAX_ACTIVE = 3
 
+# Project autopilot: one baseline at a time, only for code-type projects with a plan and no submission.
+from podium import projects
+launched = []
+projects.baseline = lambda slug, ref=None: launched.append(slug)
+for slug, kind in (("pj-code", "code"), ("pj-agent", "other")):
+    db.x("INSERT INTO competitions (slug,title,metric,kind,deadline,state,higher_is_better,max_daily_submissions,rules_accepted) "
+         "VALUES (?,?,?,?,'2099-01-01T00:00:00+00:00','project',1,1,1)", slug, slug, "x", kind)
+pj_tmp = Path(tempfile.mkdtemp()); config.ROOT, _root = pj_tmp, config.ROOT
+for slug in ("pj-code", "pj-agent"):
+    (pj_tmp / "projects" / slug).mkdir(parents=True); (pj_tmp / "projects" / slug / "PLAN.md").write_text(f"`{slug}`")
+projects.auto_baseline(); assert launched == ["pj-code"], launched   # agent competitions are never auto-run
+(pj_tmp / "projects/pj-code/runs/baseline-1").mkdir(parents=True)
+(pj_tmp / "projects/pj-code/runs/baseline-1/run.json").write_text('{"status": "running"}')
+projects.auto_baseline(); assert launched == ["pj-code"], launched   # a live run blocks a second launch
+config.ROOT = _root
+
 # Tree search: UCB picks a less-explored good branch; every 6th is an exploration draft; deadline -> final round.
 ok_nodes = [{"id": "a", "cv_mean": 0.80, "summary": "x", "parent_id": None},
             {"id": "b", "cv_mean": 0.82, "summary": "y", "parent_id": "a"},

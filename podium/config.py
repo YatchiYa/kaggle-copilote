@@ -106,6 +106,8 @@ PASSWORD = env("PODIUM_PASSWORD", "")  # dashboard password (required when PODIU
 REFLECT_EVERY = env("PODIUM_REFLECT_EVERY", 4)  # strategist re-plans after this many experiments
 
 AUTO_SUBMIT = env("PODIUM_AUTO_SUBMIT", 1) == 1
+# Projects: launch the public baseline (fork of the best public notebook) by itself, one project at a time
+PROJECT_AUTOPILOT = env("PODIUM_PROJECT_AUTOPILOT", 1) == 1
 DAILY_SUBMISSIONS = env("PODIUM_DAILY_SUBMISSIONS", 0)  # 0 = each competition's own Kaggle daily limit
 COMP_CAP_USD = env("PODIUM_COMP_CAP_USD", 20.0)
 COMP_CAP_HOURS = env("PODIUM_COMP_CAP_HOURS", 200.0)  # local compute is free; this is a runaway guard

@@ -143,8 +143,9 @@ def baseline(slug, ref=None):
     meta.setdefault("language", "python")
     meta.update({"id": f"{user}/{name}", "title": name, "is_private": True})
     meta.pop("id_no", None)
-    for k in ("competition_sources",):
-        meta[k] = sorted(set((meta.get(k) or []) + [slug]))
+    for k in ("dataset_sources", "kernel_sources", "model_sources", "competition_sources"):
+        meta[k] = [x for x in (meta.get(k) or []) if x]  # sources we can't see come back as "" and break the push/run
+    meta["competition_sources"] = sorted(set(meta["competition_sources"] + [slug]))
     (kdir / "kernel-metadata.json").write_text(json.dumps(meta, indent=1))
     resp = _kaggle().kernels_push(str(kdir), acc=meta.get("machine_shape") if meta.get("enable_gpu") else None)
     info = {"ref": f"{user}/{name}", "version": getattr(resp, "version_number", None), "agent": f"fork of {src['ref']}",
@@ -257,6 +258,30 @@ def track():
                     db.emit("Submitter", "agent.error", {"error": f"baseline submission failed: {str(e)[:300]}"},
                             competition=c["slug"])
             rj.write_text(json.dumps(info, indent=1))
+
+
+def auto_baseline():
+    """Autopilot: a joined code-type project with a plan, no Kaggle submission and no run yet gets its public baseline.
+    One project at a time (Kaggle GPU quota), never for agent/paper competitions (kind 'other')."""
+    from .agents import fleet_paused
+    if not config.PROJECT_AUTOPILOT or not config.AUTO_SUBMIT or fleet_paused():
+        return
+    comps = db.q("SELECT * FROM competitions WHERE state='project' AND kind!='other' AND deadline > ?", db.now())
+    for c in comps:  # one live run anywhere is enough
+        rd = project_dir(c["slug"]) / "runs"
+        for rj in rd.glob("*/run.json") if rd.exists() else []:
+            r = json.loads(rj.read_text())
+            if not (r.get("failed") or r.get("submitted") or r.get("collected")):
+                return
+    for c in comps:
+        d = project_dir(c["slug"])
+        if (d / "PLAN.md").exists() and not (d / "runs").exists() and not db.setting(f"proj:{c['slug']}", {}).get("count"):
+            try:
+                baseline(c["slug"])
+            except Exception as e:
+                (d / "runs").mkdir(parents=True, exist_ok=True)  # don't retry every pass
+                db.emit("Gatekeeper", "agent.error", {"error": f"autopilot baseline failed: {str(e)[:300]}"}, competition=c["slug"])
+            return
 
 
 _worker = None

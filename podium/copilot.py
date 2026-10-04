@@ -38,7 +38,7 @@ Tools:
 - pause(slug) / stop(slug): pause, or stop a competition (it stays stopped until start; results are kept).
 - archive(slug): remove a competition from all lists and recommendations (files and history kept).
 - set_setting(key, value): change a setting. Keys: PODIUM_MAX_ACTIVE, PODIUM_MIN_CHANCE, PODIUM_MAX_EXPERIMENTS,
-  PODIUM_REFLECT_EVERY, PODIUM_AUTO_SUBMIT, PODIUM_REVIEW, PODIUM_DAILY_SUBMISSIONS, PODIUM_SCOUT_SECONDS,
+  PODIUM_REFLECT_EVERY, PODIUM_AUTO_SUBMIT, PODIUM_PROJECT_AUTOPILOT, PODIUM_REVIEW, PODIUM_DAILY_SUBMISSIONS, PODIUM_SCOUT_SECONDS,
   PODIUM_WEEKLY_CAP_USD, PODIUM_COMP_CAP_USD, PODIUM_COMP_CAP_HOURS, PODIUM_NOTIFY_EMAIL, PODIUM_MODEL.
 - scout_now(): run the competition scout on the next fleet pass instead of waiting for the hourly run.
 - kaggle_submissions(slug): the user's real Kaggle submission history for a competition (status, scores, errors),
@@ -82,7 +82,9 @@ supported by the fleet. Ended competitions can only be worked in practice mode (
 ranked).
 Agent, paper and code-only competitions are not run by the fleet; they are dedicated projects. Podium still drives
 them: each gets projects/<slug>/ with the official pages, top public notebooks and an expert PLAN.md (timeline shown
-on the Ongoing page), a one-click public baseline (fork of the best public notebook, run and submitted on Kaggle),
+on the Ongoing page), a public baseline (fork of the best public notebook, run and submitted on Kaggle; the project autopilot
+launches it by itself for code-type projects without a submission, one at a time; the user can also click it), self-healing
+Kaggle runs (failed runs are diagnosed; setting fixes are applied and re-run automatically),
 and automatic tracking of every Kaggle submission, score and rank. Deeper work is built with the user's developer. The user deliberately flagged Google DeepMind's
 gemma-4-developer-agent ($65k) as the flagship dedicated project: never suggest clearing that decision; explain
 that it is handled outside the fleet. The paper track (gemma-4-developer-agent-paper) is its natural companion

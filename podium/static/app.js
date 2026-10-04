@@ -68,7 +68,10 @@ const STATE = {active: ["Working", "ok"], needs_rules: ["Join needed", "warn"], 
                archived: ["Archived", ""]};
 const IN_PLAY = ["active", "done", "needs_rules", "project"];
 const stateBadge = c => { const [l, k] = c.paused ? STATE.paused : (STATE[c.state] || [c.state, ""]);
-  const pj = c.state === "project" && c.project?.count ? ` · ${c.project.status === "pending" ? "scoring…" : esc(c.project.status)}` : "";
+  const pp = c.project || {};
+  const pj = c.state !== "project" ? "" : new Date(c.deadline) < new Date() ? " · ended" : ["pending", "running", "queued"].includes(pp.status) ? " · scoring…"
+    : pp.live ? ` · ${pp.live} Kaggle run${pp.live > 1 ? "s" : ""}` : pp.best != null ? ` · scored ${num(pp.best, 2)}`
+    : !pp.plan ? " · writing plan…" : pp.count ? "" : " · plan ready";
   const tip = c.project ? ` data-tip="${esc(`${c.project.count || 0} Kaggle submission(s). Latest: ${c.project.latest || "none"} (${c.project.status || "none"})`)}"` : "";
   return `<span class="badge ${k}"${tip}>${c.running && !c.paused ? '<i class="dot on"></i>' : ""}${l}${pj}</span>`; };
 const rankText = c => c.lb_rank ? `#${c.lb_rank}<span class="muted">/${c.lb_teams}</span>` : "—";
@@ -207,7 +210,7 @@ function agentRows(f) {
 }
 
 // ---------- Competitions list (search, filters, sortable columns)
-const CT = Object.assign({sort: "chance", dir: -1, q: "", kind: "", cat: "", joined: false}, store.get("ctable", {}));
+const CT = Object.assign({sort: "chance", dir: -1, q: "", kind: "", cat: "", joined: false, hidden: []}, store.get("ctable", {}));
 const STATE_ORDER = {active: 0, project: 1, needs_rules: 2, done: 3, scouted: 4, stopped: 5, archived: 6, finished: 7};
 const COLS = [
   ["name", "Competition", c => c.title.toLowerCase()], ["chance", "Rank chance", c => c.interest_score || 0],
@@ -215,8 +218,18 @@ const COLS = [
   ["cv", "Best CV", c => c.best_cv ?? -Infinity], ["lb", "Public LB", c => c.lb_public ?? -Infinity],
   ["gap", "LB − CV", c => c.cv_lb_gap == null ? Infinity : Math.abs(c.cv_lb_gap)], ["subs", "Subs today", c => c.submissions_today],
   ["spend", "Spend", c => c.spend_usd || 0], ["deadline", "Deadline", c => +new Date(c.deadline)]];
+const CELLS = {
+  name: c => `<td class="comp-name"><b>${esc(c.title)}</b><small>${esc(c.slug)} · ${esc(c.kind)} · ${esc(c.category || "")}${c.rules_accepted ? ' · <span class="ok">joined</span>' : ""}</small></td>`,
+  chance: c => c.state === "project" ? `<td class="r muted" data-tip="Dedicated project: no fleet rank-chance score">—</td>`
+    : `<td class="r" data-tip="${esc(c.why || "not scored yet")}"><div style="display:inline-flex;align-items:center;gap:8px"><div class="meter" style="width:60px"><i style="width:${c.interest_score || 0}%"></i></div><span class="num">${(c.interest_score || 0) | 0}</span></div></td>`,
+  state: c => `<td>${stateBadge(c)}</td>`, rank: c => `<td class="r num">${rankText(c)}</td>`, cv: c => `<td class="r num">${num(c.best_cv)}</td>`,
+  lb: c => `<td class="r num">${num(c.lb_public)}</td>`,
+  gap: c => `<td class="r num">${c.cv_lb_gap == null ? "—" : `<span class="${c.diverged ? "warn" : "muted"}">${c.cv_lb_gap > 0 ? "+" : ""}${num(c.cv_lb_gap)}</span>`}</td>`,
+  subs: c => `<td class="r num">${c.submissions_today}/${c.quota}</td>`, spend: c => `<td class="r num">${money(c.spend_usd)}</td>`,
+  deadline: c => `<td class="r">${c.state === "finished" ? "ended" : daysLeft(c.deadline) + " d"}</td>`};
 async function pageCompetitions(v, r) {
   crumbs([["Competitions"]]);
+  const shown = COLS.filter(([k]) => k === "name" || !CT.hidden.includes(k));
   const f = await loadFleet(), filt = r.slug || "play";
   const groups = {play: c => IN_PLAY.includes(c.state), rec: c => c.state === "scouted" && c.interest_score >= f.config.min_chance,
                   stopped: c => ["stopped", "archived"].includes(c.state), all: c => c.state !== "archived"};
@@ -234,8 +247,12 @@ async function pageCompetitions(v, r) {
     <select id="ctKind" aria-label="Kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === CT.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select>
     <select id="ctCat" aria-label="Category"><option value="">All categories</option>${cats.map(k => `<option ${k === CT.cat ? "selected" : ""}>${esc(k)}</option>`).join("")}</select>
     <label class="muted" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="ctJoined" ${CT.joined ? "checked" : ""}> Joined only</label>
-    <button class="btn sm" id="ctClear">Clear</button><span class="muted" id="ctCount"></span></div>
-  <div class="card"><div class="table-wrap"><table><thead><tr>${COLS.map(([k, l]) =>
+    <button class="btn sm" id="ctClear">Clear</button>
+    <details class="colpick"><summary class="btn sm">${icon("settings")}Columns</summary><div class="colpick-menu">${COLS.filter(([k]) => k !== "name").map(([k, l]) =>
+      `<label><input type="checkbox" data-col="${k}" ${CT.hidden.includes(k) ? "" : "checked"}> ${l}</label>`).join("")}
+      <button class="btn sm" id="colAll" type="button">Show all</button></div></details>
+    <span class="muted" id="ctCount"></span></div>
+  <div class="card"><div class="table-wrap"><table><thead><tr>${shown.map(([k, l]) =>
     `<th class="${k === "name" || k === "state" ? "" : "r"} sortable" data-sort="${k}" aria-sort="${CT.sort === k ? (CT.dir > 0 ? "ascending" : "descending") : "none"}">${l}${CT.sort === k ? (CT.dir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}<th></th></tr></thead>
     <tbody id="ctBody"></tbody></table></div></div>`;
   const draw = () => {
@@ -244,14 +261,8 @@ async function pageCompetitions(v, r) {
       (!q || `${c.title} ${c.slug}`.toLowerCase().includes(q)) && (!CT.kind || c.kind === CT.kind) && (!CT.cat || c.category === CT.cat) && (!CT.joined || c.rules_accepted))
       .sort((a, b) => { const x = col[2](a), y = col[2](b); return (x > y ? 1 : x < y ? -1 : 0) * CT.dir; });
     $("#ctCount").textContent = `${rows.length} competition${rows.length === 1 ? "" : "s"}`;
-    $("#ctBody").innerHTML = rows.map(c => `<tr class="click" data-slug="${esc(c.slug)}">
-      <td class="comp-name"><b>${esc(c.title)}</b><small>${esc(c.slug)} · ${esc(c.kind)} · ${esc(c.category || "")}${c.rules_accepted ? ' · <span class="ok">joined</span>' : ""}</small></td>
-      <td class="r" data-tip="${esc(c.why || "not scored yet")}"><div style="display:inline-flex;align-items:center;gap:8px"><div class="meter" style="width:60px"><i style="width:${c.interest_score || 0}%"></i></div><span class="num">${(c.interest_score || 0) | 0}</span></div></td>
-      <td>${stateBadge(c)}</td><td class="r num">${rankText(c)}</td><td class="r num">${num(c.best_cv)}</td><td class="r num">${num(c.lb_public)}</td>
-      <td class="r num">${c.cv_lb_gap == null ? "—" : `<span class="${c.diverged ? "warn" : "muted"}">${c.cv_lb_gap > 0 ? "+" : ""}${num(c.cv_lb_gap)}</span>`}</td>
-      <td class="r num">${c.submissions_today}/${c.quota}</td><td class="r num">${money(c.spend_usd)}</td>
-      <td class="r">${c.state === "finished" ? "ended" : daysLeft(c.deadline) + " d"}</td>
-      <td class="r">${compActions(c)}</td></tr>`).join("") || `<tr><td colspan="11" class="empty">No competitions match.</td></tr>`;
+    $("#ctBody").innerHTML = rows.map(c => `<tr class="click" data-slug="${esc(c.slug)}">${shown.map(([k]) => CELLS[k](c)).join("")}
+      <td class="r">${compActions(c)}</td></tr>`).join("") || `<tr><td colspan="${shown.length + 1}" class="empty">No competitions match.</td></tr>`;
     bindRows($("#ctBody").closest("table"));
   };
   const save = () => { store.set("ctable", CT); draw(); };
@@ -287,13 +298,17 @@ async function pageCompetitions(v, r) {
   $("#ctKind").onchange = e => { CT.kind = e.target.value; save(); };
   $("#ctCat").onchange = e => { CT.cat = e.target.value; save(); };
   $("#ctJoined").onchange = e => { CT.joined = e.target.checked; save(); };
+  $$("[data-col]", v).forEach(cb => cb.onchange = () => { CT.hidden = $$("[data-col]", v).filter(x => !x.checked).map(x => x.dataset.col);
+    store.set("ctable", CT); render(); });
+  $("#colAll").onclick = () => { CT.hidden = []; store.set("ctable", CT); render(); };
   $("#ctClear").onclick = () => { Object.assign(CT, {q: "", kind: "", cat: "", joined: false}); store.set("ctable", CT); render(); };
   draw();
 }
 function compActions(c) {
   if (c.state === "active") return `<button class="btn sm" data-act="pause" data-slug="${esc(c.slug)}">${c.paused ? "Resume" : "Pause"}</button>
     <button class="btn sm danger" data-act="stop" data-slug="${esc(c.slug)}">Stop</button>`;
-  if (c.state === "project") return `<a class="btn sm" href="https://www.kaggle.com/competitions/${esc(c.slug)}" target="_blank" rel="noopener">Kaggle ${icon("ext")}</a>`;
+  if (c.state === "project") return `<button class="btn sm" data-go="competition/${esc(c.slug)}">Open project</button>`
+    + (c.kind !== "other" && !c.project?.runs ? ` <button class="btn sm primary" data-act="project/baseline" data-slug="${esc(c.slug)}" title="Fork the best public notebook privately, run it on Kaggle, submit it">Baseline</button>` : "");
   if (["stopped", "archived"].includes(c.state)) return `<button class="btn sm" data-act="activate" data-slug="${esc(c.slug)}">Resume</button>`;
   if (c.state === "needs_rules") return `<a class="btn sm" href="https://www.kaggle.com/competitions/${esc(c.slug)}/rules" target="_blank" rel="noopener">Join ${icon("ext")}</a>`;
   if (["scouted", "done"].includes(c.state)) return `<button class="btn sm" data-act="activate" data-slug="${esc(c.slug)}">${c.state === "done" ? "New run" : "Work on it"}</button>`;
@@ -303,12 +318,16 @@ function bindRows(root) {
   $$("tr.click", root).forEach(tr => tr.onclick = async e => {
     const b = e.target.closest("[data-act]");
     if (e.target.closest("a")) return;
+    const g = e.target.closest("[data-go]");
+    if (g) { e.stopPropagation(); return go(g.dataset.go); }
+    if (b && b.dataset.act === "project/baseline" && !confirm("Fork the best public notebook privately, run it on Kaggle (GPU quota) and submit it when it finishes (1 submission)?")) return;
     if (b) {
       e.stopPropagation();
       if (b.dataset.act === "stop" && !confirm("Stop this competition? Its running experiment is cancelled and it stays stopped until you resume it.")) return;
-      await post(`/api/competitions/${b.dataset.slug}/${b.dataset.act}`);
+      try { await post(`/api/competitions/${b.dataset.slug}/${b.dataset.act}`); } catch (x) { return toast(String(x.message || x), 6000); }
       toast({activate: "Queued: the Gatekeeper starts it within a minute.", stop: "Stopped. It stays stopped until you resume it.",
-             archive: "Archived: hidden from lists; files and history kept."}[b.dataset.act] || "Updated.");
+             archive: "Archived: hidden from lists; files and history kept.",
+             "project/baseline": "Baseline launched on Kaggle: it is submitted automatically when it finishes."}[b.dataset.act] || "Updated.");
       await loadFleet(); return render();
     }
     go(`competition/${tr.dataset.slug}`);
@@ -730,6 +749,7 @@ async function pageSettings(v) {
     <div class="stack">
       <div class="card"><div class="card-h"><h3>Autonomy</h3></div><div class="card-b form" data-group>
         ${tog("PODIUM_AUTO_SUBMIT", "Auto-submit", "Submit to Kaggle on real CV gains and use spare quota for leaderboard probes.")}
+        ${tog("PODIUM_PROJECT_AUTOPILOT", "Project autopilot", "Dedicated projects get their public-notebook baseline launched and submitted automatically (one at a time, Kaggle GPU quota).")}
         ${tog("PODIUM_REVIEW", "Expert code review before submit", "An LLM reviewer must pass every LLM-written submission (leakage, validation, format).")}
         ${field("PODIUM_MAX_ACTIVE", "Competitions in parallel", "Each runs its own experiment stream.", "number", 'min="1" max="10"')}
         ${field("PODIUM_KINDS", "Competition kinds the fleet works on", "Comma list: tabular, code (notebook-only), cv, nlp, audio, other. Code/cv/nlp run as Kaggle notebooks (free GPU).", "text")}
