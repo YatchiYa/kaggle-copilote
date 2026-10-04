@@ -1,10 +1,22 @@
+# secrets
 .env
+.env.*
+!.env.example
 kaggle.json
 docs/kaggle/info.md
+*.pem
+
+# runtime data (database, competitions, experiments, logs, locks)
 data/
+
+# dedicated projects: Podium's per-competition workspace (Kaggle pages, forked public notebooks,
+# run outputs, submissions). Competition data and others' notebooks must not be redistributed.
+projects/
+
+# python / tooling
 .venv/
 __pycache__/
-
-# competition data must not be redistributed (rules 2.4)
-projects/*/data/
-projects/*/experiments/runs/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.DS_Store
